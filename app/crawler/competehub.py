@@ -1,7 +1,7 @@
 """
-DoraHacks 爬虫 — 通过 CloakBrowser 绕过 WAF 爬取真实数据
-网站: https://dorahacks.io/hackathon
-技术: AWS WAF 人机验证，需 CloakBrowser 绕过
+CompeteHub (AI赛事通) 爬虫 — 通过 CloakBrowser 渲染 SSR 页面
+网站: https://www.competehub.com/competitions
+技术: Next.js SSR + RSC payload，数据嵌入 self.__next_f.push()
 """
 
 import json
@@ -13,16 +13,19 @@ from app.crawler.base import BaseCrawler, CrawlResult
 logger = logging.getLogger(__name__)
 
 
-class DoraHacksCrawler(BaseCrawler):
-    platform_name = "dorahacks"
-    base_url = "https://dorahacks.io/hackathon"
+class CompeteHubCrawler(BaseCrawler):
+    platform_name = "competehub"
+    base_url = "https://www.competehub.com/competitions"
 
     async def fetch_list(self) -> list[str]:
-        """用 CloakBrowser 渲染列表页"""
+        """用 CloakBrowser 渲染列表页，提取竞赛链接"""
+        # CloakBrowser 是同步 API，需要在线程中运行
         import asyncio
-        return await asyncio.to_thread(self._sync_fetch_list)
+        urls = await asyncio.to_thread(self._sync_fetch_list)
+        return urls
 
     def _sync_fetch_list(self) -> list[str]:
+        """同步方法：用 CloakBrowser 渲染页面"""
         from cloakbrowser import CloakBrowser
 
         urls = []
@@ -31,20 +34,18 @@ class DoraHacksCrawler(BaseCrawler):
             browser = CloakBrowser(headless=True)
             page = browser.new_page()
 
-            for page_num in range(1, 4):
+            for page_num in range(1, 3):  # 爬2页
                 list_url = f"{self.base_url}?page={page_num}" if page_num > 1 else self.base_url
                 page.goto(list_url, wait_until="networkidle", timeout=30000)
-                page.wait_for_timeout(3000)
+                page.wait_for_timeout(2000)
 
-                # 提取黑客松链接
-                links = page.query_selector_all('a[href*="/hackathon/"]')
+                # 提取竞赛链接
+                links = page.query_selector_all('a[href*="/competitions/"]')
                 for link in links:
                     href = link.get_attribute("href") or ""
-                    if href and "/hackathon/" in href:
-                        full_url = href if href.startswith("http") else f"https://dorahacks.io{href}"
-                        # 排除列表页自身
-                        if full_url != self.base_url and full_url not in urls:
-                            urls.append(full_url)
+                    if href and "/competitions/" in href and href not in urls:
+                        full_url = href if href.startswith("http") else f"https://www.competehub.com{href}"
+                        urls.append(full_url)
 
                 logger.info(f"[{self.platform_name}] 第{page_num}页获取 {len(links)} 个链接")
 
@@ -65,6 +66,7 @@ class DoraHacksCrawler(BaseCrawler):
         return await asyncio.to_thread(self._sync_fetch_detail, url)
 
     def _sync_fetch_detail(self, url: str) -> CrawlResult:
+        """同步方法：渲染详情页并提取数据"""
         from cloakbrowser import CloakBrowser
 
         browser = None
@@ -74,20 +76,21 @@ class DoraHacksCrawler(BaseCrawler):
             page.goto(url, wait_until="networkidle", timeout=30000)
             page.wait_for_timeout(2000)
 
-            # 提取标题
+            # 提取页面文本内容
             title_el = page.query_selector("h1")
             title = title_el.inner_text().strip() if title_el else ""
 
-            # 提取页面内容
+            # 提取页面主要内容
             body_text = ""
             main_el = page.query_selector("main") or page.query_selector("article") or page.query_selector("body")
             if main_el:
                 body_text = main_el.inner_text().strip()[:3000]
 
-            # 尝试拦截 API 响应获取结构化数据
-            raw_data = self._extract_from_page(page, url)
+            # 尝试从 Next.js RSC payload 中提取结构化数据
+            raw_data = self._extract_next_data(page, url)
             raw_data["title"] = raw_data.get("title") or title
             raw_data["url"] = url
+
             if not raw_data.get("description"):
                 raw_data["description"] = body_text[:1000]
 
@@ -114,41 +117,40 @@ class DoraHacksCrawler(BaseCrawler):
                 except Exception:
                     pass
 
-    def _extract_from_page(self, page, url: str) -> dict:
-        """从页面 DOM 中提取结构化数据"""
+    def _extract_next_data(self, page, url: str) -> dict:
+        """从 Next.js RSC payload 中提取数据"""
         data = {}
         try:
-            # 提取常见字段
-            selectors = {
-                "prize": [".prize", ".bounty", "[class*='prize']", "[class*='bounty']"],
-                "date": [".date", ".time", "[class*='date']", "[class*='time']", "[class*='schedule']"],
-                "location": [".location", ".venue", "[class*='location']", "[class*='venue']"],
-                "organizer": [".organizer", "[class*='organizer']"],
-            }
+            # 尝试获取 __NEXT_DATA__ (传统 SSR)
+            next_data_script = page.query_selector('script#__NEXT_DATA__')
+            if next_data_script:
+                content = next_data_script.inner_text()
+                parsed = json.loads(content)
+                props = parsed.get("props", {}).get("pageProps", {})
+                data.update(props)
+                return data
 
-            for key, sel_list in selectors.items():
-                for sel in sel_list:
-                    el = page.query_selector(sel)
-                    if el:
-                        text = el.inner_text().strip()
-                        if text:
-                            data[key] = text
-                            break
-
-            # 提取赛道标签
-            tags = []
-            tag_els = page.query_selector_all("[class*='tag'], [class*='track'], [class*='badge']")
-            for el in tag_els:
-                text = el.inner_text().strip()
-                if text and len(text) < 50:
-                    tags.append(text)
-            if tags:
-                data["tracks"] = tags
-
+            # 尝试从 self.__next_f.push() 中提取 (RSC)
+            scripts = page.query_selector_all('script')
+            for script in scripts:
+                content = script.inner_text()
+                if "__next_f.push" in content:
+                    # 提取 JSON 片段
+                    matches = re.findall(r'"((?:[^"\\]|\\.)*)"', content)
+                    for match in matches:
+                        if len(match) > 50:
+                            try:
+                                fragment = json.loads(f'"{match}"')
+                                if isinstance(fragment, str) and "{" in fragment:
+                                    parsed = json.loads(fragment)
+                                    if isinstance(parsed, dict):
+                                        data.update(parsed)
+                            except (json.JSONDecodeError, ValueError):
+                                continue
         except Exception as e:
-            logger.debug(f"[{self.platform_name}] DOM 提取失败: {e}")
+            logger.debug(f"[{self.platform_name}] Next.js 数据提取失败: {e}")
 
         return data
 
 
-dorahacks_crawler = DoraHacksCrawler()
+competehub_crawler = CompeteHubCrawler()

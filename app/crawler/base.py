@@ -44,6 +44,10 @@ class BaseCrawler(ABC):
         """抓取详情页，返回原始数据"""
         ...
 
+    async def _delay(self):
+        """请求间延迟"""
+        await asyncio.sleep(self.request_delay)
+
     async def run(self) -> list[CrawlResult]:
         """执行完整爬取流程"""
         logger.info(f"[{self.platform_name}] 开始爬取...")
