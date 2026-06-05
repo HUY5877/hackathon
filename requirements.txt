@@ -1,0 +1,29 @@
+# 黑客松信息聚合与开发者赋能平台
+# Hackathon Information Aggregation & Developer Empowerment Platform
+#
+# 技术栈: Python 3.11+ / FastAPI / SQLAlchemy / Pydantic / APScheduler
+#
+# 项目架构（对应架构图代码.txt）：
+#   1. 终端用户层    → 前端（不在本仓库）
+#   2. 前端展示层    → 前端（不在本仓库）
+#   3. 后端业务逻辑层 → app/api/ + app/services/
+#   4. 数据爬取层    → app/crawler/
+#   5. 外部依赖      → 第三方 API 调用
+
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+sqlalchemy==2.0.35
+alembic==1.13.2
+pydantic==2.9.2
+pydantic-settings==2.5.2
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+python-multipart==0.0.12
+apscheduler==3.10.4
+httpx==0.27.2
+beautifulsoup4==4.12.3
+lxml==5.3.0
+playwright==1.47.0
+redis==5.1.1
+celery==5.4.0
+python-dotenv==1.0.1

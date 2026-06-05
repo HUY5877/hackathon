@@ -1,0 +1,57 @@
+# ── Python 虚拟环境 ──────────────────────
+venv/
+env/
+.venv/
+*.pyc
+*.pyo
+__pycache__/
+
+# ── IDE / 编辑器 ──────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# ── 环境变量 & 敏感配置 ───────────────────
+.env
+.env.*
+!.env.example
+
+# ── 操作系统 ──────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Python 构建 & 分发包 ──────────────────
+*.egg-info/
+*.egg
+dist/
+build/
+*.whl
+
+# ── 测试 & 覆盖率 ─────────────────────────
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# ── 日志 & 数据库 ─────────────────────────
+*.log
+*.db
+*.sqlite3
+logs/
+
+# ── 临时文件 ──────────────────────────────
+*.tmp
+*.temp
+tmp/
+temp/
+
+# ── Jupyter ───────────────────────────────
+.ipynb_checkpoints/
+
+# ── Alembic 数据库迁移（按需取消注释） ────
+# alembic/versions/
