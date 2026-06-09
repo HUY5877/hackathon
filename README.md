@@ -10,7 +10,7 @@
 | **认证** | JWT (python-jose) |
 | **定时任务** | APScheduler 3.10 |
 | **爬虫** | httpx + BeautifulSoup4 + Playwright |
-| **数据库** | PostgreSQL (可替换为 MySQL) |
+| **数据库** | PostgreSQL 16 (可替换为 MySQL) |
 | **缓存** | Redis |
 
 ## 项目结构
