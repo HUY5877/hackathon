@@ -1,12 +1,12 @@
-"""
-DoraHacks 爬虫 — 通过 CloakBrowser 绕过 WAF 爬取真实数据
+"""DoraHacks 爬虫 — 通过 CloakBrowser 绕过 WAF 爬取真实数据
 网站: https://dorahacks.io/hackathon
-技术: AWS WAF 人机验证，需 CloakBrowser 绕过；不可用时降级到 httpx
+技术: AWS WAF 人机验证，需 CloakBrowser stealth 绕过
 """
 
 import logging
+import re
 
-from app.crawler.base import CrawlResult
+from app.crawler.base import CrawlResult, extract_images_from_html
 from app.crawler.cloak_base import CloakBrowserBaseCrawler
 
 logger = logging.getLogger(__name__)
@@ -16,78 +16,89 @@ class DoraHacksCrawler(CloakBrowserBaseCrawler):
     platform_name = "dorahacks"
     base_url = "https://dorahacks.io/hackathon"
 
-    def _fetch_list_with_page(self, page) -> list[str]:
-        """用 CloakBrowser 渲染列表页"""
+    def _parse_list_html(self, html: str) -> list[str]:
+        """从列表页 HTML 提取 hackathon 链接"""
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "lxml")
         urls: list[str] = []
-        for page_num in range(1, 4):
-            list_url = f"{self.base_url}?page={page_num}" if page_num > 1 else self.base_url
-            if not self._safe_goto(page, list_url, timeout=30000):
-                logger.warning(f"[{self.platform_name}] 第 {page_num} 页导航失败")
-                continue
 
-            links = page.query_selector_all('a[href*="/hackathon/"]')
-            new_count = 0
-            for link in links:
-                href = link.get_attribute("href") or ""
-                if href and "/hackathon/" in href:
-                    full_url = href if href.startswith("http") else f"https://dorahacks.io{href}"
-                    if full_url != self.base_url and full_url not in urls:
-                        urls.append(full_url)
-                        new_count += 1
-            logger.info(f"[{self.platform_name}] 第{page_num}页获取 {new_count} 个链接")
+        # DoraHacks 列表页中 hackathon 卡片链接
+        for a in soup.select('a[href*="/hackathon/"]'):
+            href = a.get("href", "")
+            if not href:
+                continue
+            # 匹配 /hackathon/<id> 格式
+            match = re.match(r"(?:https?://dorahacks\.io)?/hackathon/([\w\-]+)/?$", href)
+            if match:
+                slug = match.group(1)
+                full_url = f"https://dorahacks.io/hackathon/{slug}"
+                if full_url not in urls:
+                    urls.append(full_url)
+
         return urls
 
-    def _fetch_detail_with_page(self, page, url: str) -> CrawlResult:
-        """用 CloakBrowser 渲染详情页"""
-        if not self._safe_goto(page, url, timeout=30000):
-            return CrawlResult(
-                source_platform=self.platform_name,
-                source_url=url,
-                raw_title="",
-                success=False,
-                error_message="页面导航失败",
-            )
+    def _parse_detail_html(self, html: str, url: str) -> dict:
+        """从详情页 HTML 提取结构化数据"""
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "lxml")
 
-        title = self._extract_text(page, "h1")
+        data: dict = {"url": url}
 
-        body_text = ""
-        main_el = page.query_selector("main") or page.query_selector("article") or page.query_selector("body")
-        if main_el:
-            body_text = main_el.inner_text().strip()[:3000]
+        # 提取图片
+        cover_image, image_urls = extract_images_from_html(soup, base_url="https://dorahacks.io")
+        if cover_image:
+            data["cover_image"] = cover_image
+        data["image_urls"] = image_urls
 
-        raw_data = self._extract_from_page(page, url)
-        raw_data["title"] = raw_data.get("title") or title
-        raw_data["url"] = url
-        if not raw_data.get("description"):
-            raw_data["description"] = body_text[:1000]
+        # 标题
+        title_el = soup.select_one("h1") or soup.select_one("[class*='title']")
+        if title_el:
+            data["title"] = title_el.get_text(strip=True)
 
-        return CrawlResult(
-            source_platform=self.platform_name,
-            source_url=url,
-            raw_title=raw_data.get("title", title),
-            raw_description=body_text[:500] if body_text else None,
-            raw_data=raw_data,
+        # 描述
+        desc_el = (
+            soup.select_one("[class*='description']")
+            or soup.select_one("main")
+            or soup.select_one("article")
         )
+        if desc_el:
+            data["description"] = desc_el.get_text(" ", strip=True)[:2000]
 
-    def _extract_from_page(self, page, url: str) -> dict:
-        """从页面 DOM 中提取结构化数据"""
-        data: dict = {}
-        selectors = {
-            "prize": [".prize", ".bounty", "[class*='prize']", "[class*='bounty']"],
-            "date": [".date", ".time", "[class*='date']", "[class*='time']", "[class*='schedule']"],
-            "location": [".location", ".venue", "[class*='location']", "[class*='venue']"],
-            "organizer": [".organizer", "[class*='organizer']"],
-        }
-        for key, sel_list in selectors.items():
-            for sel in sel_list:
-                text = self._extract_text(page, sel)
-                if text:
-                    data[key] = text
-                    break
+        # 奖金
+        prize_el = soup.select_one("[class*='prize']") or soup.select_one("[class*='bounty']")
+        if prize_el:
+            data["prize"] = prize_el.get_text(strip=True)
 
-        tags = self._extract_all_texts(page, "[class*='tag'], [class*='track'], [class*='badge']")
+        # 时间
+        for el in soup.select("[class*='date'], [class*='time'], time"):
+            text = el.get_text(strip=True)
+            if text:
+                if "start" in text.lower() or "begin" in text.lower():
+                    data["start_date"] = text
+                elif "end" in text.lower():
+                    data["end_date"] = text
+                elif "deadline" in text.lower():
+                    data["signup_end"] = text
+
+        # 地点
+        location_el = soup.select_one("[class*='location']") or soup.select_one("[class*='venue']")
+        if location_el:
+            data["location"] = location_el.get_text(strip=True)
+
+        # 主办方
+        organizer_el = soup.select_one("[class*='organizer']") or soup.select_one("[class*='host']")
+        if organizer_el:
+            data["organizer"] = organizer_el.get_text(strip=True)
+
+        # 标签
+        tags: list[str] = []
+        for el in soup.select("[class*='tag'], [class*='track']"):
+            text = el.get_text(strip=True)
+            if text and len(text) < 50 and text not in tags:
+                tags.append(text)
         if tags:
             data["tracks"] = tags
+
         return data
 
     # ── httpx 降级方案 ──────────────────────────────
@@ -101,18 +112,14 @@ class DoraHacksCrawler(CloakBrowserBaseCrawler):
         """httpx 降级：尝试获取基础 HTML"""
         try:
             resp = await self._safe_get(url)
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(resp.text, "lxml")
-            title_el = soup.select_one("h1")
-            title = title_el.get_text(strip=True) if title_el else ""
-            body = soup.select_one("main") or soup.select_one("body")
-            body_text = body.get_text(strip=True)[:2000] if body else ""
+            raw_data = self._parse_detail_html(resp.text, url)
             return CrawlResult(
                 source_platform=self.platform_name,
                 source_url=url,
-                raw_title=title,
-                raw_description=body_text[:500],
-                raw_data={"title": title, "description": body_text, "url": url, "_fallback": "httpx"},
+                raw_title=raw_data.get("title", ""),
+                raw_description=(raw_data.get("description", "") or "")[:500],
+                raw_data=raw_data,
+                image_urls=raw_data.get("image_urls", []),
             )
         except Exception as e:
             return CrawlResult(
