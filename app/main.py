@@ -25,24 +25,34 @@ from app.config import settings
 from app.api.v1.router import router as api_v1_router
 from app.middleware.auth_middleware import AuthMiddleware
 from app.crawler.scheduler import scheduler
+from app.crawler.apscheduler_manager import scheduler_manager
+from app.crawler.logging_config import setup_logging
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
     # ── 启动时 ──
+    # 配置日志（debug 模式下用 text，生产可用 json）
+    log_format = "text" if settings.DEBUG else "json"
+    setup_logging(level="DEBUG" if settings.DEBUG else "INFO", format_type=log_format)
+
     print(f"🚀 {settings.APP_NAME} v{settings.APP_VERSION} 启动中...")
     print(f"📡 API 文档: http://{settings.HOST}:{settings.PORT}/docs")
     print(f"🔧 Debug 模式: {settings.DEBUG}")
-    # TODO: 启动 APScheduler 定时爬虫任务
-    # from apscheduler.schedulers.asyncio import AsyncIOScheduler
-    # ...
+
+    # 启动 APScheduler 定时爬虫任务
+    try:
+        scheduler_manager.start()
+        print(f"⏰ 定时爬虫已启动，共 {len(scheduler_manager.get_jobs())} 个任务")
+    except Exception as e:
+        print(f"⚠️ 定时爬虫启动失败: {e}")
 
     yield
 
     # ── 关闭时 ──
     print("🛑 应用关闭中...")
-    # TODO: 关闭数据库连接池、取消定时任务等
+    scheduler_manager.stop()
 
 
 app = FastAPI(
@@ -102,9 +112,9 @@ async def root():
     }
 
 
-@app.get("/api/crawler/status", tags=["系统"])
-async def crawler_status():
-    """爬虫系统状态查询"""
+@app.get("/api/crawler/status", tags=["系统"], deprecated=True)
+async def crawler_status_legacy():
+    """爬虫系统状态查询（已迁移至 /api/v1/crawler/status）"""
     return scheduler.get_status()
 
 

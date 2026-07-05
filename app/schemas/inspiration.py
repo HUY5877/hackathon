@@ -1,7 +1,7 @@
 """灵感池 Schema — PGC 案例拆解内容的请求/响应"""
 
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── 请求 ────────────────────────────────────
@@ -81,8 +81,7 @@ class InspirationSummaryResponse(BaseModel):
     is_featured: bool = Field(description="是否为精选推荐，true 表示在首页突出展示")
     created_at: datetime = Field(description="内容发布时间")
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class InspirationDetailResponse(InspirationSummaryResponse):
@@ -120,5 +119,4 @@ class InspirationDetailResponse(InspirationSummaryResponse):
         description="源黑客松赛事页面链接，需登录查看",
     )
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

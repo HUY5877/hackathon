@@ -7,14 +7,12 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 
 from app.schemas.hackathon import (
-    HackathonFilterParams,
     HackathonSummaryResponse,
     HackathonDetailResponse,
     ExternalClickResponse,
 )
 from app.schemas.common import ApiResponse, PaginatedResponse
 from app.services import hackathon_service
-from app.api.deps import get_optional_user
 
 router = APIRouter(prefix="/hackathons", tags=["信息大厅"])
 

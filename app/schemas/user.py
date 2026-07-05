@@ -1,7 +1,7 @@
 """用户 Schema — 注册、登录、画像标签、EDM 订阅"""
 
 from datetime import datetime
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field
 
 
 # ── 请求 ────────────────────────────────────
@@ -86,8 +86,7 @@ class UserProfileResponse(BaseModel):
     email_verified: bool = Field(description="邮箱是否已验证")
     created_at: datetime = Field(description="账号注册时间")
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TokenResponse(BaseModel):

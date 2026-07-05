@@ -25,6 +25,10 @@ class HackathonStatus(str, enum.Enum):
     ENDED = "ended"             # 已结束
 
 
+# 跨数据库兼容的列表类型：PostgreSQL 用 ARRAY，其他用 JSON
+ListStrType = JSON().with_variant(ARRAY(String), "postgresql")
+
+
 class Hackathon(Base):
     """黑客松赛事 — 经过 LLM 清洗后的标准化字段"""
 
@@ -50,9 +54,9 @@ class Hackathon(Base):
     # ── 分类标签 ──────────────────────────────
     mode: Mapped[HackathonMode] = mapped_column(Enum(HackathonMode), default=HackathonMode.ONLINE)
     # 赛道标签: ["AI", "Web3", "Cloud Native", "IoT", ...]
-    track_tags: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    track_tags: Mapped[list[str] | None] = mapped_column(ListStrType, nullable=True)
     # 技术栈标签: ["Python", "Solidity", "React", ...]
-    tech_tags: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    tech_tags: Mapped[list[str] | None] = mapped_column(ListStrType, nullable=True)
 
     # ── 奖金与规模 ────────────────────────────
     prize_pool: Mapped[str | None] = mapped_column(String(200), nullable=True)  # "¥50,000" / "$10,000 USD"
@@ -71,7 +75,10 @@ class Hackathon(Base):
 
     # ── 主办方信息 ────────────────────────────
     organizer: Mapped[str | None] = mapped_column(String(300), nullable=True)
-    sponsors: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    sponsors: Mapped[list[str] | None] = mapped_column(ListStrType, nullable=True)
+
+    # ── 图片 ──────────────────────────────────
+    cover_image: Mapped[str | None] = mapped_column(String(1000), nullable=True)  # 封面图 URL
 
     # ── 数据质量 ──────────────────────────────
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False)  # 是否经人工审核
