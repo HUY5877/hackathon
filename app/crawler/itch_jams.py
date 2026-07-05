@@ -1,5 +1,4 @@
-"""
-itch.io Jams 爬虫 — 全球最大游戏开发 Jam 平台
+"""itch.io Jams 爬虫 — 全球最大游戏开发 Jam 平台
 网站: https://itch.io/jams
 技术: SSR 列页 + 详情页，HTML 可直接解析
 
@@ -21,14 +20,15 @@ import logging
 import re
 from datetime import datetime
 
-from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError
+from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError, extract_images_from_html
 
 logger = logging.getLogger(__name__)
 
 
 class ItchJamsCrawler(BaseCrawler):
     platform_name = "itch_jams"
-    base_url = "https://itch.io/jams"
+    base_url = "https://itch.io"
+    jams_url = "https://itch.io/jams"
 
     async def fetch_list(self) -> list[str]:
         """抓取 itch.io Jams 列表页（支持分页）"""
@@ -37,7 +37,7 @@ class ItchJamsCrawler(BaseCrawler):
         for page in range(1, 4):
             try:
                 params = {"page": page} if page > 1 else None
-                resp = await self._safe_get(self.base_url, params=params)
+                resp = await self._safe_get(self.jams_url, params=params)
                 page_urls = self._parse_list_html(resp.text)
                 if not page_urls:
                     logger.info(f"[{self.platform_name}] 第 {page} 页无更多结果，停止")
@@ -86,6 +86,7 @@ class ItchJamsCrawler(BaseCrawler):
                 raw_title=raw_data.get("title", ""),
                 raw_description=(raw_data.get("description", "") or "")[:500],
                 raw_data=raw_data,
+                image_urls=raw_data.get("image_urls", []),
             )
         except CrawlerError as e:
             logger.error(f"[{self.platform_name}] 详情爬取失败 {url}: {e}")
@@ -103,6 +104,12 @@ class ItchJamsCrawler(BaseCrawler):
         soup = BeautifulSoup(html, "lxml")
 
         data: dict = {"url": url}
+
+        # 提取图片（通用函数）
+        cover_image, image_urls = extract_images_from_html(soup, base_url=self.base_url)
+        if cover_image:
+            data["cover_image"] = cover_image
+        data["image_urls"] = image_urls
 
         # 标题：itch.io jam 详情页标题在 .jam_title 或 h1
         title_el = (

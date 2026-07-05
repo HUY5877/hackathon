@@ -9,7 +9,7 @@ MLH 是全球最大的学生黑客松组织者之一，每年分季节举办多�
 import logging
 import re
 
-from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError
+from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError, extract_images_from_html
 
 logger = logging.getLogger(__name__)
 
@@ -43,21 +43,57 @@ class MLHCrawler(BaseCrawler):
         return urls
 
     def _parse_list_html(self, html: str) -> list[str]:
-        """从 MLH 赛季页提取事件详情链接"""
+        """从 MLH 赛季页提取事件详情链接
+
+        MLH 页面将事件数据嵌入在 <script type="application/json"> 中，
+        每个事件包含 slug、name、url（如 /events/<slug>/prizes）等字段。
+        """
         from bs4 import BeautifulSoup
+        import json
         soup = BeautifulSoup(html, "lxml")
         urls: list[str] = []
-        # MLH 事件链接格式：/events/<slug> 或 https://mlh.io/events/<slug>
-        for a in soup.select('a[href*="/events/"]'):
-            href = a.get("href", "")
-            if not href:
+
+        # 1. 从页面内嵌 JSON 中提取事件数据（主要来源）
+        for script in soup.find_all("script", type="application/json"):
+            text = script.string or ""
+            if not text:
                 continue
-            # 仅保留详情页，排除 /seasons/.../events 列表页本身
-            match = re.match(r"(?:https?://mlh\.io)?/events/([^/?#]+)$", href)
-            if match:
-                full_url = href if href.startswith("http") else f"https://mlh.io{href}"
-                if full_url not in urls:
-                    urls.append(full_url)
+            try:
+                data = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+
+            def _extract_events(node):
+                """递归查找包含 slug 和 url 的事件对象"""
+                if isinstance(node, dict):
+                    if (
+                        "slug" in node
+                        and "url" in node
+                        and isinstance(node.get("url"), str)
+                        and "/events/" in node["url"]
+                    ):
+                        event_url = node["url"]
+                        full_url = f"https://mlh.io{event_url}" if event_url.startswith("/") else event_url
+                        if full_url not in urls:
+                            urls.append(full_url)
+                    for v in node.values():
+                        _extract_events(v)
+                elif isinstance(node, list):
+                    for item in node:
+                        _extract_events(item)
+
+            _extract_events(data)
+
+        # 2. 回退：从 HTML 锚点链接中匹配 /events/<slug> 格式
+        if not urls:
+            for a in soup.find_all("a", href=True):
+                href = a.get("href", "")
+                match = re.match(r"(?:https?://(?:www\.)?mlh\.io)?/events/([^/?#]+)", href)
+                if match:
+                    full_url = f"https://mlh.io/events/{match.group(1)}"
+                    if full_url not in urls:
+                        urls.append(full_url)
+
         return urls
 
     async def fetch_detail(self, url: str) -> CrawlResult:
@@ -71,6 +107,7 @@ class MLHCrawler(BaseCrawler):
                 raw_title=raw_data.get("title", ""),
                 raw_description=(raw_data.get("description", "") or "")[:500],
                 raw_data=raw_data,
+                image_urls=raw_data.get("image_urls", []),
             )
         except CrawlerError as e:
             logger.error(f"[{self.platform_name}] 详情爬取失败 {url}: {e}")
@@ -149,6 +186,11 @@ class MLHCrawler(BaseCrawler):
         signup_el = soup.select_one('a[href*="register"]') or soup.select_one('a[href*="signup"]')
         if signup_el:
             data["signup_url"] = signup_el.get("href", "")
+
+        # 提取图片
+        cover_image, image_urls = extract_images_from_html(soup, base_url=self.base_url)
+        data["cover_image"] = cover_image
+        data["image_urls"] = image_urls
 
         return data
 

@@ -1,5 +1,4 @@
-"""
-Hackathon.com 爬虫 — 全球黑客松聚合平台
+"""Hackathon.com 爬虫 — 全球黑客松聚合平台
 网站: https://www.hackathon.com/
 技术: SSR 列表页 + 详情页，HTML 可直接解析
 
@@ -14,7 +13,7 @@ Hackathon.com 列表页包含：
 import logging
 import re
 
-from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError
+from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError, extract_images_from_html
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +65,7 @@ class HackathonComCrawler(BaseCrawler):
                 raw_title=raw_data.get("title", ""),
                 raw_description=(raw_data.get("description", "") or "")[:500],
                 raw_data=raw_data,
+                image_urls=raw_data.get("image_urls", []),
             )
         except CrawlerError as e:
             logger.error(f"[{self.platform_name}] 详情爬取失败 {url}: {e}")
@@ -83,6 +83,12 @@ class HackathonComCrawler(BaseCrawler):
         soup = BeautifulSoup(html, "lxml")
 
         data: dict = {"url": url}
+
+        # 提取图片（通用函数）
+        cover_image, image_urls = extract_images_from_html(soup, base_url=self.base_url)
+        if cover_image:
+            data["cover_image"] = cover_image
+        data["image_urls"] = image_urls
 
         # 标题
         title_el = soup.select_one("h1") or soup.select_one("h2")

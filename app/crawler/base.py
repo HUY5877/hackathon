@@ -131,6 +131,63 @@ def _pick_user_agent() -> str:
 
 # ── 基类 ──────────────────────────────────────────────
 
+def extract_images_from_html(soup, base_url: str = "") -> tuple[str | None, list[str]]:
+    """从 BeautifulSoup 解析的 HTML 中提取图片 URL
+
+    Returns:
+        (cover_image, image_urls)
+        - cover_image: 最佳封面图 URL（OG / Twitter Card 优先）
+        - image_urls: 所有有效图片 URL 列表（去重）
+    """
+    from urllib.parse import urljoin
+
+    image_urls: list[str] = []
+    cover_image: str | None = None
+
+    # 1. Open Graph 封面图（最标准、最可靠）
+    og_image = soup.select_one('meta[property="og:image"]')
+    if og_image:
+        img_url = og_image.get("content")
+        if img_url:
+            full_url = urljoin(base_url, img_url)
+            cover_image = full_url
+            if full_url not in image_urls:
+                image_urls.append(full_url)
+
+    # 2. Twitter Card 图
+    if not cover_image:
+        tw_image = soup.select_one('meta[name="twitter:image"]')
+        if tw_image:
+            img_url = tw_image.get("content")
+            if img_url:
+                full_url = urljoin(base_url, img_url)
+                cover_image = full_url
+                if full_url not in image_urls:
+                    image_urls.append(full_url)
+
+    # 3. 收集页面中所有有效图片（过滤小图标）
+    for img in soup.select("img"):
+        src = img.get("src") or img.get("data-src")
+        if src:
+            full_src = urljoin(base_url, src)
+            if full_src.startswith("http") and full_src not in image_urls:
+                # 过滤小图标（通过 width 属性或 URL 特征）
+                width = img.get("width")
+                if width:
+                    try:
+                        if int(width) < 80:
+                            continue
+                    except ValueError:
+                        pass
+                # 过滤常见的小图标/头像/Logo 路径
+                src_lower = src.lower()
+                if any(k in src_lower for k in ["icon", "avatar", "logo", "favicon", "badge"]):
+                    continue
+                image_urls.append(full_src)
+
+    return cover_image, image_urls
+
+
 class BaseCrawler(ABC):
     """爬虫基类
 

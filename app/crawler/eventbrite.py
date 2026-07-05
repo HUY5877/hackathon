@@ -90,6 +90,7 @@ class EventbriteCrawler(BaseCrawler):
                 raw_title=raw_data.get("title", ""),
                 raw_description=(raw_data.get("description", "") or "")[:500],
                 raw_data=raw_data,
+                image_urls=raw_data.get("image_urls", []),
             )
         except CrawlerError as e:
             logger.error(f"[{self.platform_name}] 详情爬取失败 {url}: {e}")
@@ -183,6 +184,52 @@ class EventbriteCrawler(BaseCrawler):
         if tags:
             data["tracks"] = tags
 
+        # 9. 提取图片 ──────────────────────────────
+        image_urls: list[str] = []
+        base_url = self.base_url
+
+        # 9.1 JSON-LD 中可能包含图片
+        if json_ld and json_ld.get("image"):
+            img = json_ld["image"]
+            if isinstance(img, str):
+                image_urls.append(img)
+            elif isinstance(img, list) and img:
+                image_urls.append(img[0])
+
+        # 9.2 OG 封面图
+        og_image = soup.select_one('meta[property="og:image"]')
+        if og_image:
+            img_url = og_image.get("content")
+            if img_url:
+                from urllib.parse import urljoin
+                full_img_url = urljoin(base_url, img_url)
+                data["cover_image"] = full_img_url
+                if full_img_url not in image_urls:
+                    image_urls.append(full_img_url)
+
+        # 9.3 Twitter Card 图
+        if not data.get("cover_image"):
+            tw_image = soup.select_one('meta[name="twitter:image"]')
+            if tw_image:
+                img_url = tw_image.get("content")
+                if img_url:
+                    from urllib.parse import urljoin
+                    full_img_url = urljoin(base_url, img_url)
+                    data["cover_image"] = full_img_url
+                    if full_img_url not in image_urls:
+                        image_urls.append(full_img_url)
+
+        # 9.4 收集页面中所有有效图片
+        for img in soup.select("img"):
+            src = img.get("src") or img.get("data-src")
+            if src:
+                from urllib.parse import urljoin
+                full_src = urljoin(base_url, src)
+                if full_src.startswith("http") and full_src not in image_urls:
+                    image_urls.append(full_src)
+
+        data["image_urls"] = image_urls
+
         return data
 
     def _extract_json_ld(self, soup) -> dict:
@@ -224,6 +271,9 @@ class EventbriteCrawler(BaseCrawler):
                             data["start_date"] = item["startDate"]
                         if item.get("endDate"):
                             data["end_date"] = item["endDate"]
+                        # image 可能包含在 JSON-LD 中
+                        if item.get("image"):
+                            data["image"] = item["image"]
                         # location 可能是 Place 对象或字符串
                         loc = item.get("location")
                         if isinstance(loc, dict):

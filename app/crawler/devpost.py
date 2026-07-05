@@ -57,11 +57,13 @@ class DevpostCrawler(BaseCrawler):
             href = a.get("href", "")
             if not href:
                 continue
-            # 仅保留详情页（/hackathons/<slug>），排除列表页和子路径
-            match = re.match(r"https?://devpost\.com/hackathons/([^/?#]+)$", href)
+            # 支持绝对路径 https://devpost.com/hackathons/<slug> 和相对路径 /hackathons/<slug>
+            match = re.match(r"(?:https?://devpost\.com)?/hackathons/([^/?#]+)", href)
             if match:
-                if href not in urls:
-                    urls.append(href)
+                slug = match.group(1)
+                full_url = f"https://devpost.com/hackathons/{slug}"
+                if full_url not in urls:
+                    urls.append(full_url)
         return urls
 
     async def fetch_detail(self, url: str) -> CrawlResult:

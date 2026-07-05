@@ -7,7 +7,7 @@
 import logging
 import re
 
-from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError, ParseError
+from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError, ParseError, extract_images_from_html
 
 logger = logging.getLogger(__name__)
 
@@ -149,10 +149,15 @@ class TianchiCrawler(BaseCrawler):
         if content_el:
             body_text = content_el.get_text(strip=True)[:3000]
 
+        # 提取图片
+        cover_image, image_urls = extract_images_from_html(soup, base_url=self.base_url)
+
         raw_data.update({
             "title": title or raw_data.get("title", ""),
             "description": body_text,
             "url": url,
+            "cover_image": cover_image,
+            "image_urls": image_urls,
         })
         return raw_data
 
@@ -163,6 +168,7 @@ class TianchiCrawler(BaseCrawler):
             raw_title=raw_data.get("title", ""),
             raw_description=(raw_data.get("description", "") or "")[:500],
             raw_data=raw_data,
+            image_urls=raw_data.get("image_urls", []),
         )
 
 
