@@ -30,7 +30,16 @@ from app.crawler.scheduler import scheduler
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
-    # ── 启动时 ──
+    # ── 启动时：测试数据库连接 ──
+    try:
+        from app.db.session import async_session_factory
+        from sqlalchemy import text
+        async with async_session_factory() as session:
+            await session.execute(text("SELECT 1"))
+        print(f"✅ 数据库连接成功: {settings.DATABASE_URL}")
+    except Exception as e:
+        print(f"❌ 数据库连接失败: {e}")
+    # ── 启动日志 ──
     print(f"🚀 {settings.APP_NAME} v{settings.APP_VERSION} 启动中...")
     print(f"📡 API 文档: http://{settings.HOST}:{settings.PORT}/docs")
     print(f"🔧 Debug 模式: {settings.DEBUG}")
