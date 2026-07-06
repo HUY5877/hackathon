@@ -1,8 +1,21 @@
-# 登录后端接本地 SQLite — 设计文档
+# 登录后端接本地 PostgreSQL — 设计文档
 
 **日期**: 2026-07-06
-**范围**: 把 auth（认证）链路从 mock 实现改为真实实现，接本地 SQLite 数据库，跑通「注册 → 登录 → 签发 JWT → 校验 token」全流程。
+**范围**: 把 auth（认证）链路从 mock 实现改为真实实现，接**本地独立 PostgreSQL**（Docker，隔离于线上/云端），跑通「注册 → 登录 → 签发 JWT → 校验 token」全流程。
 **不在范围内**: hackathons / inspiration / recommendations / empowerment / users(画像) 等模块继续保持 mock，不动，零回归。
+
+> **数据库选型变更记录**：初稿选 SQLite（摩擦最小）。后与用户确认目标是「为将来更好地上线」，改为**本地 PostgreSQL 16**，与生产同款引擎，避免「本地绿、上线炸」的方言差异（ARRAY / 自增 / 大小写 / 事务 / JSON）。本地库跟线上完全隔离，绝不触碰线上数据库。
+
+---
+
+## 0. 环境现状（已就绪）
+
+- 本地 Postgres 已通过 Docker 起好，跟线上零关系：
+  - 容器 `hackthon-pg`（`postgres:16-alpine`），独立数据卷 `hackthon-pgdata`
+  - `localhost:5432`，用户 `postgres` / 密码 `postgres`，库 `hackathon`（当前空库）
+- 连接串已写入本地 `.env`（`.gitignore` 已忽略，不进仓库）。
+- 代码仓库 clone 在 `C:\Users\ASUS.LAPTOP-2OCDOG87\hackthon`（`dev-hy` 分支）。
+- **约束**：所有改动只在本地；不 push 到 GitHub；不往仓库加基础设施文件（Docker 用 `docker run` 起、不写 compose 进仓库）。
 
 ---
 
@@ -20,8 +33,8 @@
 | `app/api/deps.py` | `get_current_user`/`get_optional_user` 调 mock decode + get_user_by_id | **不改签名**，因其调用的 service 方法变真即可 |
 | `app/middleware/auth_middleware.py` | 实质为放行占位 | **不改** |
 | `app/db/session.py` | 异步引擎 + `async_session_factory` + `get_db` + `Base` | **不改** |
-| `app/config.py` | 配置指向 Postgres | 仅通过 `.env` 覆盖为 SQLite |
-| `requirements.txt` | 无 `aiosqlite` | **新增 aiosqlite** |
+| `app/config.py` | 配置默认指向 Postgres | **不改**，`.env` 覆盖为本地 Postgres |
+| `requirements.txt` | `asyncpg` 已在（Postgres 异步驱动），`passlib[bcrypt]` / `python-jose` 均已在 | **仅处理 bcrypt 版本约束**，无需新增驱动 |
 
 ### 关键的现有范式（必须对齐）
 `app/services/hackathon_service.py` 已给出真实 DB 实现的既定写法：**在 service 方法内部直接用 `async with async_session_factory() as session:` 自管会话**，而不是从路由 `Depends(get_db)` 注入。
@@ -30,26 +43,29 @@
 
 ---
 
-## 2. 本地数据库选型：SQLite
+## 2. 本地数据库：PostgreSQL 16（Docker，隔离）
 
-- 驱动：`aiosqlite`（异步）。
-- `.env` 本地配置：
+- 驱动：`asyncpg`（已在 requirements.txt）。
+- `.env` 本地配置（已写好）：
   ```
-  DATABASE_URL=sqlite+aiosqlite:///./hackathon.db
+  DATABASE_URL=postgresql+asyncpg://postgres:postgres@localhost:5432/hackathon
+  DATABASE_URL_SYNC=postgresql://postgres:postgres@localhost:5432/hackathon
   DEBUG=true
   JWT_SECRET_KEY=<本地随机串>
+  JWT_ALGORITHM=HS256
+  JWT_ACCESS_TOKEN_EXPIRE_MINUTES=1440
   ```
-- 生产 Postgres 配置保留在 `.env.example`，代码零改动可切回（SQLAlchemy 抹平方言差异）。
+- 生产 Postgres 配置保留在 `.env.example`，代码零改动可切生产。
 
 ### 建表策略：只建 `users` 一张表
-`hackathon` / `inspiration` / `empowerment` 三个模型使用 Postgres 专有的 `ARRAY(String)` 列，SQLite 不支持——因此**不能用 `Base.metadata.create_all`**（会因这些表建表失败而崩）。
-
-→ **决策**：在 `main.py` 的 lifespan 启动钩子里，**只建 User 表**：
+本任务只碰 auth，只需要 `users` 表。启动时在 `main.py` 的 lifespan 钩子里显式建 User 表：
 ```python
 async with engine.begin() as conn:
     await conn.run_sync(User.__table__.create, checkfirst=True)
 ```
-`checkfirst=True` 保证已存在时不报错。本地测试要的是开箱即跑，不引入 alembic 迁移。生产以后再上 alembic。
+`checkfirst=True` 保证已存在时不报错。
+
+> 说明：Postgres 支持 ARRAY，理论上 `Base.metadata.create_all` 也能建全部表；但本任务范围只有 auth，**只建 users 表**更聚焦、零副作用（不为不相关模块建表）。其他模块要落地时再各自建表 / 上 alembic。
 
 ---
 
@@ -93,7 +109,7 @@ ORM → dict 用一个内部小 helper（`_to_dict(user)`）统一，保证字�
 POST /api/v1/auth/login {email, password}
   → auth.py:login()
     → auth_service.login(email, password)
-        async_session_factory(): SELECT users WHERE email=? 
+        async_session_factory(): SELECT users WHERE email=?
         → security.verify_password(password, user.hashed_password)  ✔
         → 返回 user dict
     → auth_service.create_access_token(user["id"])
@@ -118,48 +134,53 @@ POST /api/v1/auth/login {email, password}
 | token 无效 / 过期 | `security.decode_access_token` 返回 None → `HTTPException(401, "认证令牌无效或已过期")` |
 | 用户不存在（token 合法但用户被删） | `HTTPException(401, "用户不存在")` |
 
-DB 写入异常沿用 `get_db` / `async_session_factory` 的 `rollback` 语义（service 内 `async with` 块出错自动回滚）。
+DB 写入异常沿用 `async_session_factory` 的 `async with` 语义（块内出错自动回滚）。
 
 ---
 
 ## 6. 测试
 
 ### 单元/集成测试 `tests/test_auth.py`
-用 `TestClient`（沿用 `conftest.py` 已有 `client` fixture），针对**独立临时 SQLite**（避免污染开发库 `hackathon.db`）：
-- conftest 在 app 导入前，将 `DATABASE_URL` 环境变量设为临时 sqlite 文件，并建 User 表；测试结束清理。
+用 `TestClient`（沿用 `conftest.py` 已有 `client` fixture），针对**独立的测试 Postgres 库**（避免污染开发库 `hackathon`）：
+- conftest 在 app 导入前，将 `DATABASE_URL` 环境变量指向独立测试库（如 `hackathon_test`），并建 User 表；测试结束清理（drop 表或 truncate）。
 - 覆盖用例：
   1. 注册成功 → 200，返回 access_token + user。
   2. 重复注册（同 email） → 409。
   3. 登录成功 → 200，token 可用。
   4. 密码错误 → 401。
-  5. 用注册拿到的 token 访问受保护接口（如 `/api/v1/users/me`）→ 200 / 或校验 `get_current_user` 通过。
+  5. 用注册拿到的 token 访问受保护接口（校验 `get_current_user` 通过）。
   6. 无效 token → 401。
+
+> 备注：因 service 用模块级 `async_session_factory`（engine 绑定 `settings.DATABASE_URL`），测试须在导入 app 前设好 `DATABASE_URL` 环境变量再建库/表。这是 service 自管 session 范式的取舍，实现计划里会明确处理顺序。
 
 ### 手动冒烟
 ```
 uvicorn app.main:app --reload
 # 打开 http://localhost:8000/docs
 # 依次点 POST /api/v1/auth/register → /api/v1/auth/login → 复制 token → Authorize → 访问受保护接口
+# 在 DBeaver 刷新 hackathon → public → 表，可见 users 表与新注册数据
 ```
 
 ---
 
 ## 7. 交付清单
 
-- [ ] `requirements.txt` 加 `aiosqlite`（并处理 bcrypt 版本约束）
-- [ ] `.env` 本地 SQLite 配置（不提交，`.env.example` 保留 Postgres）
+- [ ] `requirements.txt` 处理 bcrypt 版本约束（`bcrypt<4.1`）
+- [x] `.env` 本地 Postgres 配置（已写，gitignored）
+- [x] 本地 Postgres 容器 `hackthon-pg` 就绪
 - [ ] 新建 `app/core/__init__.py` + `app/core/security.py`
 - [ ] 重写 `app/services/auth_service.py`
 - [ ] `app/main.py` lifespan 内建 User 表
 - [ ] `tests/test_auth.py`
-- [ ] 本地跑通：pytest 全绿 + `/docs` 冒烟登录成功
+- [ ] 本地跑通：pytest 全绿 + `/docs` 冒烟登录成功 + DBeaver 可见数据
 
 ---
 
 ## 8. 关键取舍备忘
 
-1. **service 自管 session**（对齐 hackathon_service），非 Depends 注入 → 路由/deps 零改动。
-2. **只建 users 表**（绕开其他模型的 Postgres ARRAY，SQLite 不兼容）。
-3. **security 与 service 分层**：加解密独立成模块，边界清晰、易测。
-4. **返回 dict 而非 ORM**：匹配现有路由 `user["id"]` 下标访问，最小改动。
-5. 只碰 auth 链 + db 配置，其余模块 mock 不动 → 零回归。
+1. **本地用 Postgres（非 SQLite）**：与生产同款引擎，为上线打基础，避免方言差异。本地库与线上完全隔离。
+2. **service 自管 session**（对齐 hackathon_service），非 Depends 注入 → 路由/deps 零改动。
+3. **只建 users 表**：本任务只碰 auth，聚焦、零副作用。
+4. **security 与 service 分层**：加解密独立成模块，边界清晰、易测。
+5. **返回 dict 而非 ORM**：匹配现有路由 `user["id"]` 下标访问，最小改动。
+6. 只碰 auth 链 + 本地环境，其余模块 mock 不动 → 零回归；全程不 push GitHub。
