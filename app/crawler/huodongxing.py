@@ -1,74 +1,68 @@
-"""
-活动行 (Huodongxing) 爬虫 — 国内活动发布平台
+"""活动行爬虫 — 城市活动发现平台
 网站: https://www.huodongxing.com
-技术: SSR + 搜索接口，HTML 可直接解析
+技术: SSR 页面，HTML 可直接解析
 
-改进点：
-- 多关键词搜索（黑客松/黑客马拉松/hackathon/编程竞赛）
-- 结构化字段提取（时间/地点/主办方/费用/报名状态）
-- 使用基类的 _safe_get 重试机制
+活动行首页包含：
+- 活动卡片，链接到 /event/<id> 或 <subdomain>.huodongxing.com/event/<id>
+- 卡片包含标题、时间、地点、主办方信息
+
+详情页包含：
+- 完整标题、描述、时间、地点、主办方、票价
 """
 
 import logging
 import re
 
-from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError
+from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError, extract_images_from_html
 
 logger = logging.getLogger(__name__)
-
-# 搜索关键词：覆盖中英文与同义词
-SEARCH_KEYWORDS = ["黑客松", "黑客马拉松", "hackathon", "编程竞赛", "创客马拉松"]
 
 
 class HuodongxingCrawler(BaseCrawler):
     platform_name = "huodongxing"
     base_url = "https://www.huodongxing.com"
-    search_url = "https://www.huodongxing.com/search"
 
     async def fetch_list(self) -> list[str]:
-        """多关键词搜索，合并去重"""
+        """抓取活动行首页活动列表"""
         urls: list[str] = []
-        for keyword in SEARCH_KEYWORDS:
-            try:
-                resp = await self._safe_get(
-                    self.search_url,
-                    params={"keyword": keyword, "city": "全部"},
-                )
-                page_urls = self._parse_search_html(resp.text)
-                new_count = 0
-                for u in page_urls:
-                    if u not in urls:
-                        urls.append(u)
-                        new_count += 1
-                logger.info(f"[{self.platform_name}] 关键词 '{keyword}' 获取 {len(page_urls)} 条 (新增 {new_count})")
-                if not page_urls:
-                    # 关键词无结果可能是被反爬，继续尝试下一个
-                    continue
-            except CrawlerError as e:
-                logger.warning(f"[{self.platform_name}] 关键词 '{keyword}' 搜索失败: {e}")
-                continue
+        try:
+            resp = await self._safe_get(self.base_url)
+            page_urls = self._parse_list_html(resp.text)
+            for u in page_urls:
+                if u not in urls:
+                    urls.append(u)
+            logger.info(f"[{self.platform_name}] 获取 {len(urls)} 个活动链接")
+        except CrawlerError as e:
+            logger.error(f"[{self.platform_name}] 列表页失败: {e}")
         return urls
 
-    def _parse_search_html(self, html: str) -> list[str]:
-        """从搜索结果 HTML 提取活动链接"""
+    def _parse_list_html(self, html: str) -> list[str]:
+        """从首页 HTML 提取活动链接
+
+        活动行活动链接格式：
+        - /event/<id>（相对路径）
+        - https://www.huodongxing.com/event/<id>（绝对路径）
+        - https://<subdomain>.huodongxing.com/event/<id>（子域名）
+        """
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, "lxml")
         urls: list[str] = []
-        # 活动行活动链接格式：/event/<id>.html 或 /event/<id>
-        for a in soup.select('a[href*="/event/"]'):
+
+        for a in soup.find_all("a", href=re.compile(r"(?:https?://[^/]+)?/event/\d+")):
             href = a.get("href", "")
             if not href:
                 continue
-            # 仅保留详情页（/event/<id>），排除其他子路径
-            match = re.search(r"/event/(\d+)", href)
-            if match:
-                full_url = href if href.startswith("http") else f"{self.base_url}{href}"
-                if full_url not in urls:
-                    urls.append(full_url)
+            # 标准化 URL：去掉 query 参数，补全协议
+            clean = href.split("?")[0].split("#")[0]
+            if clean.startswith("/"):
+                clean = f"https://www.huodongxing.com{clean}"
+            if clean.startswith("http") and clean not in urls:
+                urls.append(clean)
+
         return urls
 
     async def fetch_detail(self, url: str) -> CrawlResult:
-        """抓取活动详情页，结构化提取字段"""
+        """抓取活动详情页"""
         try:
             resp = await self._safe_get(url)
             raw_data = self._parse_detail_html(resp.text, url)
@@ -78,6 +72,7 @@ class HuodongxingCrawler(BaseCrawler):
                 raw_title=raw_data.get("title", ""),
                 raw_description=(raw_data.get("description", "") or "")[:500],
                 raw_data=raw_data,
+                image_urls=raw_data.get("image_urls", []),
             )
         except CrawlerError as e:
             logger.error(f"[{self.platform_name}] 详情爬取失败 {url}: {e}")
@@ -90,104 +85,88 @@ class HuodongxingCrawler(BaseCrawler):
             )
 
     def _parse_detail_html(self, html: str, url: str) -> dict:
-        """从活动详情页提取结构化数据"""
+        """从详情页 HTML 提取结构化数据"""
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(html, "lxml")
 
         data: dict = {"url": url}
 
+        # 提取图片
+        cover_image, image_urls = extract_images_from_html(soup, base_url=url)
+        if cover_image:
+            data["cover_image"] = cover_image
+        data["image_urls"] = image_urls
+
         # 标题
-        title_el = (
-            soup.select_one("h1")
-            or soup.select_one(".event-title")
-            or soup.select_one(".title")
-        )
+        title_el = soup.select_one("h1") or soup.select_one("[class*='title']")
         if title_el:
             data["title"] = title_el.get_text(strip=True)
 
-        # 正文内容
-        body_text = ""
-        content_el = (
-            soup.select_one(".event-detail")
-            or soup.select_one(".detail-content")
-            or soup.select_one(".content")
+        # 描述
+        desc_el = (
+            soup.select_one("[class*='description']")
+            or soup.select_one("[class*='content']")
+            or soup.select_one("meta[name='description']")
             or soup.select_one("main")
-            or soup.select_one("body")
         )
-        if content_el:
-            body_text = content_el.get_text(" ", strip=True)[:3000]
-            data["description"] = body_text
+        if desc_el:
+            text = desc_el.get_text(" ", strip=True)[:2000]
+            if text and not data.get("description"):
+                data["description"] = text
+        # meta description 作为备选
+        if not data.get("description"):
+            meta_desc = soup.select_one("meta[name='description']")
+            if meta_desc:
+                content = meta_desc.get("content", "")
+                if content:
+                    data["description"] = content
 
-        # 结构化字段提取：活动行通常用 .info-item / .detail-item / <li> 展示元信息
-        info_map = {
-            "时间": ["start_date", "end_date"],
-            "开始": ["start_date"],
-            "结束": ["end_date"],
-            "地点": ["location"],
-            "地址": ["location"],
-            "城市": ["city"],
-            "主办方": ["organizer"],
-            "主办": ["organizer"],
-            "费用": ["price"],
-            "票价": ["price"],
-            "报名": ["signup_end"],
-            "截止": ["signup_end"],
-        }
+        # 时间
+        for el in soup.select("[class*='date'], [class*='time'], time"):
+            text = el.get_text(strip=True)
+            if text:
+                if "start" in text.lower() or "begin" in text.lower():
+                    data["start_date"] = text
+                elif "end" in text.lower():
+                    data["end_date"] = text
+                elif "deadline" in text.lower():
+                    data["signup_end"] = text
+                else:
+                    # 尝试提取日期格式
+                    date_match = re.search(r"(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[日]?)", text)
+                    if date_match and not data.get("start_date"):
+                        data["start_date"] = date_match.group(1)
 
-        for item in soup.select(".info-item, .detail-item, .info-row, li, dt"):
-            text = item.get_text(" ", strip=True)
-            if not text:
-                continue
-            # 匹配 "标签：值" 或 "标签 值" 格式
-            for label, fields in info_map.items():
-                if label in text:
-                    # 提取标签后的值
-                    value = re.sub(rf"^.*{label}\s*[:：]?\s*", "", text).strip()
-                    if value and len(value) < 200:
-                        for field in fields:
-                            if field not in data or not data[field]:
-                                data[field] = value
-                        break
+        # 地点
+        location_el = soup.select_one("[class*='location']") or soup.select_one("[class*='venue']")
+        if location_el:
+            data["location"] = location_el.get_text(strip=True)
+
+        # 主办方
+        organizer_el = soup.select_one("[class*='organizer']") or soup.select_one("[class*='host']")
+        if organizer_el:
+            data["organizer"] = organizer_el.get_text(strip=True)
+
+        # 票价
+        price_el = soup.select_one("[class*='price']")
+        if price_el:
+            data["price"] = price_el.get_text(strip=True)
 
         # 模式判断
-        if data.get("location"):
-            loc = data["location"].lower()
-            if "线上" in data["location"] or "online" in loc:
-                data["mode"] = "online"
-            elif "线下" in data["location"] or "offline" in loc:
-                data["mode"] = "offline"
-            else:
-                data["mode"] = "offline"  # 活动行默认线下
-        else:
+        body_text = soup.get_text(" ", strip=True).lower()
+        if "线上" in body_text or "online" in body_text:
             data["mode"] = "online"
+        elif "线下" in body_text or "in-person" in body_text:
+            data["mode"] = "offline"
 
         # 标签
         tags: list[str] = []
-        for el in soup.select(".tag, .label, [class*='tag'], [class*='badge']"):
+        for el in soup.select("[class*='tag']"):
             text = el.get_text(strip=True)
-            if text and len(text) < 30 and text not in tags:
+            if text and len(text) < 50 and text not in tags:
                 tags.append(text)
         if tags:
             data["tracks"] = tags
-
-        # 参与人数
-        participants_el = soup.select_one("[class*='participant'], [class*='attend']")
-        if participants_el:
-            text = participants_el.get_text(strip=True)
-            nums = re.findall(r"[\d,]+", text)
-            if nums:
-                data["participants_count"] = int(nums[0].replace(",", ""))
-
-        # 报名状态
-        status_el = soup.select_one("[class*='status'], .btn-status")
-        if status_el:
-            status_text = status_el.get_text(strip=True)
-            if "报名中" in status_text or "进行中" in status_text:
-                data["status"] = "open"
-            elif "已结束" in status_text:
-                data["status"] = "ended"
-            elif "即将开始" in status_text:
-                data["status"] = "upcoming"
 
         return data
 
