@@ -21,7 +21,6 @@ from pathlib import Path
 from app.config import settings
 from app.crawler.base import CrawlResult
 from app.crawler.dorahacks import dorahacks_crawler
-from app.crawler.competehub import competehub_crawler
 from app.crawler.devpost import devpost_crawler
 from app.crawler.mlh import mlh_crawler
 from app.crawler.eventbrite import eventbrite_crawler
@@ -40,7 +39,6 @@ logger = logging.getLogger(__name__)
 # 爬虫注册表
 CRAWLER_REGISTRY = {
     "dorahacks": dorahacks_crawler,
-    "competehub": competehub_crawler,
     "devpost": devpost_crawler,
     "mlh": mlh_crawler,
     "eventbrite": eventbrite_crawler,
@@ -55,7 +53,6 @@ CRAWLER_REGISTRY = {
 # 爬取频率
 CRAWL_SCHEDULE = {
     "dorahacks": "每日 03:00",
-    "competehub": "每日 04:00",
     "devpost": "每日 02:00",
     "mlh": "每日 02:30",
     "eventbrite": "每6小时",
@@ -284,7 +281,7 @@ class CrawlerScheduler:
         """
         logger.info(f"[Scheduler] 全量爬取（含去重）开始 {datetime.now()}")
         start_time = datetime.now()
-        priority_order = ["dorahacks", "competehub", "saikr", "tianchi", "devpost", "mlh", "eventbrite", "huodongxing"]
+        priority_order = ["dorahacks", "saikr", "tianchi", "devpost", "mlh", "eventbrite", "huodongxing"]
 
         all_standardized: list[StandardizedHackathon] = []
         platform_results: list[dict] = []
