@@ -6,7 +6,7 @@ PGC 精选内容：往期黑客松获奖案例深度拆解
 from datetime import datetime
 
 from sqlalchemy import String, Boolean, DateTime, Integer, func, Text
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
@@ -41,7 +41,7 @@ class InspirationItem(Base):
 
     # ── 团队画像（用于启发用户组队） ──────────
     # 如: {"size": 4, "roles": ["前端", "后端", "设计师", "产品"], "background": "3名在校生+1名职场人"}
-    team_profile: Mapped[dict | None] = mapped_column(nullable=True)
+    team_profile: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     # ── 媒体资源 ──────────────────────────────
     cover_image_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
