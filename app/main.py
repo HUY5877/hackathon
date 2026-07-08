@@ -39,15 +39,9 @@ async def lifespan(app: FastAPI):
         print(f"✅ 数据库连接成功: {settings.DATABASE_URL}")
     except Exception as e:
         print(f"❌ 数据库连接失败: {e}")
-    # ── 启动时：建 users 表（仅本任务范围，checkfirst 幂等）──
-    try:
-        from app.db.session import engine
-        from app.models.user import User
-        async with engine.begin() as conn:
-            await conn.run_sync(User.__table__.create, checkfirst=True)
-        print("✅ users 表已就绪")
-    except Exception as e:
-        print(f"❌ 建 users 表失败: {e}")
+    # 建表交给 alembic 迁移流水线（entrypoint.sh: autogenerate + upgrade），
+    # users 表由 app/models/user.py 的 User 模型经 alembic env.py 自动扫描建立，
+    # 这里不再手动 create_all，避免两套建表逻辑并存。
     # ── 启动日志 ──
     print(f"🚀 {settings.APP_NAME} v{settings.APP_VERSION} 启动中...")
     print(f"📡 API 文档: http://{settings.HOST}:{settings.PORT}/docs")
