@@ -48,13 +48,33 @@ def _ensure_test_db() -> None:
     )
 
 
+def _create_all_tables() -> None:
+    """建齐所有表（lifespan 已不再建表，改交 alembic；测试库直接 create_all）。
+
+    用一个独立的 async 引擎在自己的 asyncio.run 里建表并 dispose，
+    不复用 app 引擎，避免与 TestClient 事件循环冲突（asyncpg 已装、psycopg2 未装）。
+    create_all 默认 checkfirst 幂等。
+    """
+    import asyncio
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from app.db import Base
+    # 导入所有模型以注册到 Base.metadata
+    from app.models import hackathon, user, inspiration, empowerment  # noqa: F401
+
+    async def _run():
+        eng = create_async_engine(os.environ["DATABASE_URL"])
+        async with eng.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        await eng.dispose()
+
+    asyncio.run(_run())
+
+
 @pytest.fixture(scope="session")
 def client():
-    """会话级 TestClient（单一事件循环，规避 asyncpg 跨循环问题）。
-
-    进入 `with TestClient(app)` 会触发 lifespan，其中 checkfirst 建 users 表。
-    """
+    """会话级 TestClient（单一事件循环，规避 asyncpg 跨循环问题）。"""
     _ensure_test_db()
+    _create_all_tables()
     from app.main import app
     with TestClient(app) as c:
         yield c
@@ -62,10 +82,13 @@ def client():
 
 @pytest.fixture(autouse=True)
 def _truncate(request):
-    """每个「用到 client（即数据库）」的用例前清空 users 表并重置自增 ID。
+    """每个「用到 client（即数据库）」的用例前清空 users / hackathons 表并重置自增 ID。
 
     只对请求了 client 的测试生效，纯单元测试（如 test_security）不被牵连连库。
     """
     if "client" in request.fixturenames:
-        _docker_psql("hackathon_test", "TRUNCATE TABLE users RESTART IDENTITY CASCADE;")
+        _docker_psql(
+            "hackathon_test",
+            "TRUNCATE TABLE users, hackathons RESTART IDENTITY CASCADE;",
+        )
     yield
