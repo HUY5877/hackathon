@@ -5,11 +5,14 @@ Vibecoding 教程 + 新手参赛指南
 
 from datetime import datetime
 
-from sqlalchemy import String, Boolean, DateTime, Integer, func, Text
+from sqlalchemy import String, Boolean, DateTime, Integer, func, Text, JSON
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
+
+# 跨数据库兼容的列表类型
+ListStrType = JSON().with_variant(ARRAY(String), "postgresql")
 
 
 class ContentType:
@@ -45,7 +48,7 @@ class EmpowermentArticle(Base):
     estimated_read_time: Mapped[int | None] = mapped_column(Integer, nullable=True)  # 预计阅读时长（分钟）
 
     # ── 标签 ──────────────────────────────────
-    tags: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    tags: Mapped[list[str] | None] = mapped_column(ListStrType, nullable=True)
 
     # ── 媒体 ──────────────────────────────────
     cover_image_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)

@@ -7,7 +7,6 @@
 from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas.empowerment import (
-    EmpowermentFilterParams,
     EmpowermentArticleResponse,
 )
 from app.schemas.common import ApiResponse, PaginatedResponse

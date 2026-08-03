@@ -5,11 +5,14 @@ PGC 精选内容：往期黑客松获奖案例深度拆解
 
 from datetime import datetime
 
-from sqlalchemy import String, Boolean, DateTime, Integer, func, Text
+from sqlalchemy import String, Boolean, DateTime, Integer, func, Text, JSON
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db import Base
+
+# 跨数据库兼容的列表类型
+ListStrType = JSON().with_variant(ARRAY(String), "postgresql")
 
 
 class InspirationItem(Base):
@@ -35,8 +38,8 @@ class InspirationItem(Base):
 
     # ── 结构化分类标签 ────────────────────────
     # 如: ["AI应用", "Web3", "开发者工具", "生活方式", "教育科技"]
-    category_tags: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
-    tech_tags: Mapped[list[str] | None] = mapped_column(ARRAY(String), nullable=True)
+    category_tags: Mapped[list[str] | None] = mapped_column(ListStrType, nullable=True)
+    tech_tags: Mapped[list[str] | None] = mapped_column(ListStrType, nullable=True)
     difficulty_level: Mapped[str | None] = mapped_column(String(50), nullable=True)  # "beginner" / "intermediate" / "advanced"
 
     # ── 团队画像（用于启发用户组队） ──────────

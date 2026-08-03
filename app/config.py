@@ -43,14 +43,20 @@ class Settings(BaseSettings):
     SMTP_USER: str = "noreply@example.com"
     SMTP_PASSWORD: str = ""
 
-    # ── 爬虫配置 ──────────────────────────────
+    # ── 爬虫配置 ──────────────────────────────────────
     CRAWLER_USER_AGENT: str = (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/130.0.0.0 Safari/537.36"
     )
-    CRAWLER_REQUEST_DELAY: float = 2.0
-    CRAWLER_PROXY_POOL: str = ""
+    CRAWLER_REQUEST_DELAY: float = 2.0  # 请求间隔（秒）
+    CRAWLER_PROXY_POOL: str = ""  # 代理地址，逗号分隔
+    CRAWLER_TIMEOUT: float = 30.0  # 单请求超时（秒）
+    CRAWLER_MAX_RETRIES: int = 3  # 最大重试次数
+    CRAWLER_MAX_ITEMS_PER_PLATFORM: int = 0  # 每平台抓取上限（0=不限）
+    CRAWLER_UA_ROTATION: bool = False  # 是否启用 UA 轮换
+    CRAWLER_LLM_CACHE_TTL: int = 86400  # LLM 清洗结果缓存秒数
+    CRAWLER_OUTPUT_DIR: str = "crawl_output"  # 爬取结果输出目录
 
     # ── 跨域 ──────────────────────────────────
     CORS_ORIGINS: list[str] = ["http://localhost:3000", "http://localhost:5173"]

@@ -1,7 +1,7 @@
 """开发者赋能 Schema — Vibecoding 教程 & 参赛指南的请求/响应"""
 
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── 请求 ────────────────────────────────────
@@ -86,5 +86,4 @@ class EmpowermentArticleResponse(BaseModel):
     created_at: datetime = Field(description="文章发布时间")
     updated_at: datetime = Field(description="文章最后更新时间")
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

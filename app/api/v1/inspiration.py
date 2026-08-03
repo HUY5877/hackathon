@@ -7,7 +7,6 @@
 from fastapi import APIRouter, HTTPException, Query, Depends
 
 from app.schemas.inspiration import (
-    InspirationFilterParams,
     InspirationSummaryResponse,
     InspirationDetailResponse,
     InteractionRequest,

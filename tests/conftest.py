@@ -9,6 +9,7 @@
 """
 
 import os
+import shutil
 import subprocess
 
 # ── 必须在任何 app.* 导入之前执行 ──────────────────────
@@ -54,6 +55,8 @@ def client():
 
     进入 `with TestClient(app)` 会触发 lifespan，其中 checkfirst 建 users 表。
     """
+    if shutil.which("docker") is None:
+        pytest.skip("Docker is required for PostgreSQL integration tests")
     _ensure_test_db()
     from app.main import app
     with TestClient(app) as c:

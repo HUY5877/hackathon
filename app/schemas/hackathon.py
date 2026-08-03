@@ -1,7 +1,7 @@
 """黑客松赛事 Schema — 信息大厅的请求/响应"""
 
 from datetime import datetime
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 # ── 请求 ────────────────────────────────────
@@ -91,10 +91,10 @@ class HackathonSummaryResponse(BaseModel):
     organizer: str | None = Field(default=None, description="主办方名称")
     view_count: int = Field(description="平台内浏览量")
     external_click_count: int = Field(description="「去官网报名」外链点击次数，用于转化追踪")
+    cover_image: str | None = Field(default=None, description="赛事封面图/海报 URL，列表页展示用")
     created_at: datetime = Field(description="数据录入时间")
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class HackathonDetailResponse(HackathonSummaryResponse):
@@ -106,8 +106,7 @@ class HackathonDetailResponse(HackathonSummaryResponse):
     city: str | None = Field(default=None, description="赛事所在城市，如 'Sydney' / 'Beijing' / 'Hong Kong'")
     is_verified: bool = Field(description="是否经过人工审核确认，true 表示数据可信")
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class ExternalClickResponse(BaseModel):
