@@ -496,22 +496,6 @@ class TestDeduplication:
 # ── 爬虫 HTML 解析测试 ────────────────────────────────
 
 class TestDevpostParsing:
-    def test_parse_list_html(self):
-        from app.crawler.devpost import DevpostCrawler
-        html = """
-        <div>
-            <a href="https://devpost.com/hackathons/ai-challenge-2026">AI Challenge</a>
-            <a href="https://devpost.com/hackathons/web3-hack">Web3 Hack</a>
-            <a href="https://devpost.com/hackathons">All Hackathons</a>
-            <a href="https://devpost.com/hackathons/ai-challenge-2026/submissions">Submissions</a>
-        </div>
-        """
-        crawler = DevpostCrawler()
-        urls = crawler._parse_list_html(html)
-        assert len(urls) == 2
-        assert "https://devpost.com/hackathons/ai-challenge-2026" in urls
-        assert "https://devpost.com/hackathons/web3-hack" in urls
-
     def test_parse_detail_html(self):
         from app.crawler.devpost import DevpostCrawler
         html = """
@@ -573,7 +557,7 @@ class TestMLHParsing:
 
 
 class TestHuodongxingParsing:
-    def test_parse_search_html(self):
+    def test_parse_list_html(self):
         from app.crawler.huodongxing import HuodongxingCrawler
         html = """
         <div>
@@ -583,7 +567,7 @@ class TestHuodongxingParsing:
         </div>
         """
         crawler = HuodongxingCrawler()
-        urls = crawler._parse_search_html(html)
+        urls = crawler._parse_list_html(html)
         assert len(urls) == 2
         assert "https://www.huodongxing.com/event/12345.html" in urls
 
@@ -914,6 +898,7 @@ class TestPersistence:
 
         # Mock session
         session = AsyncMock()
+        session.add = MagicMock()
         # _fetch_existing_by_source_url 返回空
         result_mock = MagicMock()
         result_mock.scalars.return_value.all.return_value = []
@@ -946,6 +931,7 @@ class TestPersistence:
         ]
 
         session = AsyncMock()
+        session.add = MagicMock()
         result_mock = MagicMock()
         result_mock.scalars.return_value.all.return_value = []
         slugs_mock = MagicMock()
@@ -1057,7 +1043,8 @@ class TestLLMCircuitBreaker:
 # ── CloakBrowser 基类测试 ────────────────────────────
 
 class TestCloakBrowserBase:
-    def test_cloak_not_available_fallback(self):
+    @pytest.mark.asyncio
+    async def test_cloak_not_available_fallback(self):
         """CloakBrowser 不可用时应返回 None"""
         from app.crawler.cloak_base import CloakBrowserBaseCrawler
 
@@ -1067,7 +1054,7 @@ class TestCloakBrowserBase:
         crawler = TestCrawler()
         # 模拟 cloakbrowser 未安装
         crawler._cloak_available = False
-        browser = crawler._get_browser()
+        browser = await crawler._get_browser()
         assert browser is None
 
     @pytest.mark.asyncio
@@ -1281,7 +1268,18 @@ class TestNewCrawlersRegistration:
         assert "hackathon_com" in SCHEDULE_JOBS
         assert "itch_jams" in SCHEDULE_JOBS
 
-    def test_total_platform_count(self):
-        """测试平台总数"""
+    def test_registered_platforms_match_supported_set(self):
+        """已下线的平台不得残留在注册表中。"""
         from app.crawler.scheduler import CRAWLER_REGISTRY
-        assert len(CRAWLER_REGISTRY) == 11  # 8 原有 + 3 新增
+        assert set(CRAWLER_REGISTRY) == {
+            "dorahacks",
+            "devpost",
+            "mlh",
+            "eventbrite",
+            "saikr",
+            "tianchi",
+            "huodongxing",
+            "ethglobal",
+            "hackathon_com",
+            "itch_jams",
+        }

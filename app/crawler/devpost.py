@@ -4,7 +4,7 @@
 
 Devpost 列表页 URL 格式：
     https://devpost.com/hackathons
-    
+
 Devpost 详情页 URL 格式（子域名）：
     https://<slug>.devpost.com/
 """

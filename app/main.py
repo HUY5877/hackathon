@@ -37,6 +37,19 @@ async def lifespan(app: FastAPI):
     log_format = "text" if settings.DEBUG else "json"
     setup_logging(level="DEBUG" if settings.DEBUG else "INFO", format_type=log_format)
 
+    # ── 启动时：测试数据库连接 ──
+    try:
+        from app.db.session import async_session_factory
+        from sqlalchemy import text
+        async with async_session_factory() as session:
+            await session.execute(text("SELECT 1"))
+        print(f"✅ 数据库连接成功: {settings.DATABASE_URL}")
+    except Exception as e:
+        print(f"❌ 数据库连接失败: {e}")
+    # 建表交给 alembic 迁移流水线（entrypoint.sh: autogenerate + upgrade），
+    # users 表由 app/models/user.py 的 User 模型经 alembic env.py 自动扫描建立，
+    # 这里不再手动 create_all，避免两套建表逻辑并存。
+    # ── 启动日志 ──
     print(f"🚀 {settings.APP_NAME} v{settings.APP_VERSION} 启动中...")
     print(f"📡 API 文档: http://{settings.HOST}:{settings.PORT}/docs")
     print(f"🔧 Debug 模式: {settings.DEBUG}")

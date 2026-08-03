@@ -3,6 +3,7 @@
 基于 pydantic-settings 的环境变量管理
 """
 
+import os
 from pathlib import Path
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -20,8 +21,8 @@ class Settings(BaseSettings):
     PORT: int = 8000
 
     # ── 数据库 ────────────────────────────────
-    DATABASE_URL: str = "postgresql+asyncpg://user:password@localhost:5432/hackathon"
-    DATABASE_URL_SYNC: str = "postgresql://user:password@localhost:5432/hackathon"
+    DATABASE_URL: str = "postgresql+asyncpg://postgres:123456@localhost:5432/hackathon"
+    DATABASE_URL_SYNC: str = "postgresql://postgres:123456@localhost:5432/hackathon"
 
     # ── Redis（缓存 & Celery） ────────────────
     REDIS_URL: str = "redis://localhost:6379/0"
@@ -63,7 +64,26 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
+        extra="ignore",
     )
 
 
-settings = Settings()
+def _load_settings() -> Settings:
+    """加载配置，.env 优先"""
+    env_path = Path(__file__).parent.parent / ".env"
+    if env_path.exists():
+        # pydantic_settings 会自动处理环境变量
+        return Settings(_env_file=str(env_path))
+    return Settings()
+
+
+try:
+    settings = _load_settings()
+    # 打印加载结果（隐藏密码）
+    db = settings.DATABASE_URL
+    if "@" in db:
+        db = db.split("@")[0].split("://")[0] + "://***@" + db.split("@")[1]
+    print(f"📦 配置加载成功 | 数据库: {db}")
+except Exception as e:
+    print(f"⚠️  配置加载失败: {e}")
+    settings = Settings()

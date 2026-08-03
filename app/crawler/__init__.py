@@ -4,7 +4,6 @@ from app.crawler.llm_processor import LLMProcessor, StandardizedHackathon, llm_p
 from app.crawler.mapper import to_hackathon_orm, to_hackathon_orm_batch, parse_date
 from app.crawler.persistence import persist_batch, persist_single, PersistenceResult
 from app.crawler.dorahacks import dorahacks_crawler
-from app.crawler.competehub import competehub_crawler
 from app.crawler.devpost import devpost_crawler
 from app.crawler.mlh import mlh_crawler
 from app.crawler.eventbrite import eventbrite_crawler
@@ -30,7 +29,6 @@ __all__ = [
     "persist_single",
     "PersistenceResult",
     "dorahacks_crawler",
-    "competehub_crawler",
     "devpost_crawler",
     "mlh_crawler",
     "eventbrite_crawler",

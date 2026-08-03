@@ -35,7 +35,7 @@ class CrawlerLogFilter(logging.Filter):
         # 从 logger name 提取平台名
         if not hasattr(record, "platform"):
             for part in record.name.split("."):
-                if part in ("dorahacks", "competehub", "devpost", "mlh",
+                if part in ("dorahacks", "devpost", "mlh",
                             "eventbrite", "saikr", "tianchi", "huodongxing"):
                     record.platform = part
                     break

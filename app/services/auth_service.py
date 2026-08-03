@@ -1,13 +1,21 @@
+"""用户与认证服务 — 真实数据库实现。
+
+对齐 hackathon_service 的既定范式：service 方法内部用
+`async with async_session_factory()` 自管会话，路由/依赖无需注入 db。
 """
-用户与认证服务 — 对应架构图中的「用户与认证服务 (B1)」
-目前为 Mock 实现，后续对接数据库和 JWT
-"""
-from datetime import datetime, timedelta
 
-from app.config import settings
+from datetime import datetime
 
-# ── Mock 数据 ─────────────────────────────────────────────────────────
+from sqlalchemy import select, or_
 
+from app.db.session import async_session_factory
+from app.models.user import User, UserRole
+from app.core import security
+
+# ── 遗留 Mock 数据（兼容垫片）────────────────────────────────────────
+# recommendation_service / edm_service / user_service 仍是 Mock 实现，
+# 它们 `from app.services.auth_service import MOCK_USERS`。auth 已改为真实 DB，
+# 这里保留该列表仅为让上述 Mock 模块继续工作（零回归）；待其迁移到 DB 后删除。
 MOCK_USERS: list[dict] = [
     {
         "id": 1,
@@ -55,78 +63,71 @@ MOCK_USERS: list[dict] = [
 ]
 
 
+def _to_dict(user: User) -> dict:
+    """ORM User → dict，字段对齐 UserProfileResponse（含 hashed_password 供内部用）。"""
+    return {
+        "id": user.id,
+        "email": user.email,
+        "username": user.username,
+        "hashed_password": user.hashed_password,
+        "role": user.role.value if hasattr(user.role, "value") else user.role,
+        "profile_tags": user.profile_tags,
+        "edm_subscribed": user.edm_subscribed,
+        "email_verified": user.email_verified,
+        "created_at": user.created_at,
+    }
+
+
 class AuthService:
-    """认证服务（Mock 实现）"""
+    """认证服务（数据库实现）。"""
 
     @staticmethod
     async def register(email: str, username: str, password: str) -> dict | None:
-        """注册新用户"""
-        # Mock: 检查是否已存在
-        for u in MOCK_USERS:
-            if u["email"] == email or u["username"] == username:
+        """注册新用户；email 或 username 已存在返回 None。"""
+        async with async_session_factory() as session:
+            existing = await session.execute(
+                select(User).where(or_(User.email == email, User.username == username))
+            )
+            if existing.scalar_one_or_none() is not None:
                 return None
-        new_user = {
-            "id": len(MOCK_USERS) + 1,
-            "email": email,
-            "username": username,
-            "hashed_password": f"$2b$12$mock_{password}",
-            "role": "developer",
-            "profile_tags": None,
-            "edm_subscribed": False,
-            "email_verified": False,
-            "created_at": datetime.now(),
-        }
-        MOCK_USERS.append(new_user)
-        return new_user
+            user = User(
+                email=email,
+                username=username,
+                hashed_password=security.hash_password(password),
+                role=UserRole.DEVELOPER,
+            )
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+            return _to_dict(user)
 
     @staticmethod
     async def login(email: str, password: str) -> dict | None:
-        """登录验证"""
-        for u in MOCK_USERS:
-            if u["email"] == email:
-                # Mock: 跳过真实密码验证
-                return u
-        return None
+        """按 email 查用户并校验密码；失败返回 None。"""
+        async with async_session_factory() as session:
+            result = await session.execute(select(User).where(User.email == email))
+            user = result.scalar_one_or_none()
+            if user is None or not security.verify_password(password, user.hashed_password):
+                return None
+            return _to_dict(user)
 
     @staticmethod
     async def get_user_by_id(user_id: int) -> dict | None:
-        """根据 ID 获取用户"""
-        for u in MOCK_USERS:
-            if u["id"] == user_id:
-                return u
-        return None
+        """按 ID 查用户。"""
+        async with async_session_factory() as session:
+            result = await session.execute(select(User).where(User.id == user_id))
+            user = result.scalar_one_or_none()
+            return _to_dict(user) if user is not None else None
 
     @staticmethod
     def create_access_token(user_id: int) -> str:
-        """生成 JWT Token（Mock 实现）"""
-        # 生产环境使用 python-jose 签发真实 JWT
-        import base64
-        import json
-        payload = {
-            "sub": str(user_id),
-            "exp": int((datetime.now() + timedelta(minutes=settings.JWT_ACCESS_TOKEN_EXPIRE_MINUTES)).timestamp()),
-            "iat": int(datetime.now().timestamp()),
-        }
-        # Mock: 简单 base64 编码（生产环境替换为 JWT 签名）
-        payload_b64 = base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
-        return f"mock_jwt_{payload_b64}"
+        """签发 JWT（委托 security）。"""
+        return security.create_access_token(user_id)
 
     @staticmethod
     async def decode_token(token: str) -> int | None:
-        """解析 JWT Token 获取 user_id（Mock 实现）"""
-        if not token.startswith("mock_jwt_"):
-            return None
-        try:
-            import base64
-            import json
-            payload_b64 = token[len("mock_jwt_"):]
-            payload = json.loads(base64.urlsafe_b64decode(payload_b64.encode()))
-            # 检查是否过期
-            if payload.get("exp", 0) < datetime.now().timestamp():
-                return None
-            return int(payload.get("sub", 0))
-        except Exception:
-            return None
+        """解析 JWT 得 user_id（委托 security）。"""
+        return security.decode_access_token(token)
 
 
 auth_service = AuthService()

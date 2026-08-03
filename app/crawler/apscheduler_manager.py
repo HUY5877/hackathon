@@ -6,7 +6,6 @@ APScheduler 定时任务管理 — 驱动爬虫调度器按计划运行
 
 调度策略（对应 CRAWL_SCHEDULE）：
     - dorahacks:    每日 03:00
-    - competehub:   每日 04:00
     - devpost:      每日 02:00
     - mlh:          每日 02:30
     - eventbrite:   每6小时
@@ -32,7 +31,6 @@ SCHEDULE_JOBS = {
     "devpost":      ("cron", {"hour": 2, "minute": 0}),
     "mlh":          ("cron", {"hour": 2, "minute": 30}),
     "dorahacks":    ("cron", {"hour": 3, "minute": 0}),
-    "competehub":   ("cron", {"hour": 4, "minute": 0}),
     "saikr":        ("cron", {"hour": 4, "minute": 30}),
     "tianchi":      ("cron", {"hour": 5, "minute": 0}),
     "ethglobal":    ("cron", {"hour": 5, "minute": 30}),

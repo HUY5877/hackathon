@@ -121,6 +121,20 @@ class HuodongxingCrawler(BaseCrawler):
                 if content:
                     data["description"] = content
 
+        # 活动行详情页常用“标签：值”展示时间、地点和主办方。
+        metadata_fields = {
+            "时间": "start_date",
+            "地点": "location",
+            "主办方": "organizer",
+        }
+        for el in soup.select(".info-item, .detail-item, .info-row"):
+            text = el.get_text(" ", strip=True)
+            for label, field in metadata_fields.items():
+                match = re.search(rf"{label}\s*[:：]\s*(.+)", text)
+                if match and field not in data:
+                    data[field] = match.group(1).strip()
+                    break
+
         # 时间
         for el in soup.select("[class*='date'], [class*='time'], time"):
             text = el.get_text(strip=True)
