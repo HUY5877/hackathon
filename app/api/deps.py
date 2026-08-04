@@ -23,6 +23,15 @@ async def get_current_user(authorization: str = Header(None)) -> dict:
     return user
 
 
+async def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+    """Require the current database user to have the administrator role."""
+    role = current_user.get("role")
+    role_value = role.value if hasattr(role, "value") else role
+    if role_value != "admin":
+        raise HTTPException(status_code=403, detail="当前账号没有管理权限")
+    return current_user
+
+
 async def get_optional_user(authorization: str = Header(None)) -> dict | None:
     """可选认证：已登录返回用户对象，未登录返回 None"""
     if not authorization or not authorization.startswith("Bearer "):
