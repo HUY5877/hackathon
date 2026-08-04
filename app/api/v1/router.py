@@ -9,6 +9,7 @@ from app.api.v1.recommendations import router as recommendations_router
 from app.api.v1.empowerment import router as empowerment_router
 from app.api.v1.users import router as users_router
 from app.api.v1.crawler import router as crawler_router
+from app.api.v1.admin import router as admin_router
 
 router = APIRouter(prefix="/api/v1")
 
@@ -19,3 +20,4 @@ router.include_router(recommendations_router)
 router.include_router(empowerment_router)
 router.include_router(users_router)
 router.include_router(crawler_router)
+router.include_router(admin_router)

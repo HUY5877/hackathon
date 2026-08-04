@@ -5,6 +5,7 @@ from app.services.recommendation_service import recommendation_service
 from app.services.empowerment_service import empowerment_service
 from app.services.edm_service import edm_service
 from app.services.user_service import user_service
+from app.services.admin_service import admin_service
 
 __all__ = [
     "auth_service",
@@ -14,4 +15,5 @@ __all__ = [
     "empowerment_service",
     "edm_service",
     "user_service",
+    "admin_service",
 ]
