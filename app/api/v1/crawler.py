@@ -19,7 +19,7 @@ import logging
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.api.deps import get_current_user
+from app.api.deps import get_current_user, require_admin
 from app.crawler.scheduler import scheduler, CRAWLER_REGISTRY, CRAWL_SCHEDULE
 from app.crawler.apscheduler_manager import scheduler_manager
 from app.crawler.llm_processor import llm_processor
@@ -92,7 +92,7 @@ async def get_llm_stats(_: dict = Depends(get_current_user)):
 async def run_platform(
     platform: str,
     save_json: bool = Query(default=True),
-    _: dict = Depends(get_current_user),
+    _: dict = Depends(require_admin),
 ):
     """触发单平台爬取（需认证）
 
@@ -113,7 +113,7 @@ async def run_platform(
 @router.post("/run-all")
 async def run_all(
     save_json: bool = Query(default=True),
-    _: dict = Depends(get_current_user),
+    _: dict = Depends(require_admin),
 ):
     """触发全量爬取 + 跨平台去重（需认证）
 
@@ -127,7 +127,7 @@ async def run_all(
 @router.post("/trigger/{platform}", response_model=TriggerResponse)
 async def trigger_scheduled_job(
     platform: str,
-    _: dict = Depends(get_current_user),
+    _: dict = Depends(require_admin),
 ):
     """触发定时任务立即执行（不等待，异步执行）（需认证）"""
     if platform not in CRAWLER_REGISTRY:
@@ -146,7 +146,7 @@ async def trigger_scheduled_job(
 
 
 @router.post("/circuit/reset")
-async def reset_circuit(_: dict = Depends(get_current_user)):
+async def reset_circuit(_: dict = Depends(require_admin)):
     """重置 LLM 熔断器（需认证）"""
     llm_processor.reset_circuit()
     return {"status": "ok", "message": "熔断器已重置"}

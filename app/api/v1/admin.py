@@ -7,6 +7,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 
 from app.api.deps import require_admin
 from app.schemas.admin import (
+    AdminCrawlerOverviewResponse,
+    AdminCrawlerTaskCreate,
+    AdminCrawlerTaskResponse,
     AdminHackathonDeleteRequest,
     AdminHackathonResponse,
     AdminHackathonUpdate,
@@ -14,6 +17,13 @@ from app.schemas.admin import (
     DeletedResourceResponse,
 )
 from app.schemas.common import ApiResponse, PaginatedResponse
+from app.crawler.apscheduler_manager import scheduler_manager
+from app.crawler.scheduler import CRAWLER_REGISTRY, CRAWL_SCHEDULE, scheduler
+from app.crawler.task_manager import (
+    CrawlerTaskConflict,
+    CrawlerTaskNotFound,
+    crawler_task_manager,
+)
 from app.services.admin_service import (
     AdminConflictError,
     AdminNotFoundError,
@@ -177,3 +187,84 @@ async def delete_hackathon(
         },
     )
     return ApiResponse(message="赛事已永久删除", data=DeletedResourceResponse.model_validate(deleted))
+
+
+@router.get(
+    "/crawler/overview",
+    response_model=ApiResponse[AdminCrawlerOverviewResponse],
+)
+async def get_crawler_overview():
+    """Return the live scheduler and crawler registry state."""
+
+    return ApiResponse(
+        data=AdminCrawlerOverviewResponse(
+            platforms=list(CRAWLER_REGISTRY),
+            schedules=dict(CRAWL_SCHEDULE),
+            scheduler_running=scheduler_manager.is_running,
+            jobs=scheduler_manager.get_jobs(),
+            recent_runs=scheduler.get_history(limit=20),
+        )
+    )
+
+
+@router.post(
+    "/crawler/tasks",
+    response_model=ApiResponse[AdminCrawlerTaskResponse],
+    status_code=202,
+)
+async def create_crawler_task(
+    request: AdminCrawlerTaskCreate,
+    current_admin: dict = Depends(require_admin),
+):
+    """Accept a single-platform or full crawler run for background execution."""
+
+    if request.scope == "platform" and request.platform not in CRAWLER_REGISTRY:
+        raise HTTPException(status_code=404, detail=f"未知平台: {request.platform}")
+    try:
+        task = crawler_task_manager.create(
+            scope=request.scope,
+            platform=request.platform,
+            actor_id=current_admin["id"],
+        )
+    except CrawlerTaskConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+    logger.info(
+        "Administrator triggered crawler",
+        extra={
+            "operation": "trigger_crawler",
+            "actor_id": current_admin["id"],
+            "target_id": task.task_id,
+            "target_platform": request.platform,
+            "target_scope": request.scope,
+        },
+    )
+    return ApiResponse(
+        message="爬虫任务已启动",
+        data=AdminCrawlerTaskResponse.model_validate(task),
+    )
+
+
+@router.get(
+    "/crawler/tasks",
+    response_model=ApiResponse[list[AdminCrawlerTaskResponse]],
+)
+async def list_crawler_tasks(
+    status: Literal["queued", "running", "completed", "failed"] | None = Query(default=None),
+):
+    tasks = crawler_task_manager.list_tasks(status=status)
+    return ApiResponse(
+        data=[AdminCrawlerTaskResponse.model_validate(task) for task in tasks]
+    )
+
+
+@router.get(
+    "/crawler/tasks/{task_id}",
+    response_model=ApiResponse[AdminCrawlerTaskResponse],
+)
+async def get_crawler_task(task_id: str):
+    try:
+        task = crawler_task_manager.get_task(task_id)
+    except CrawlerTaskNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ApiResponse(data=AdminCrawlerTaskResponse.model_validate(task))

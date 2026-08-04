@@ -137,3 +137,53 @@ class AdminHackathonResponse(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class AdminCrawlerTaskCreate(BaseModel):
+    """Request for one administrator-triggered crawler run."""
+
+    scope: Literal["platform", "all"]
+    platform: str | None = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="after")
+    def validate_target(self):
+        if self.scope == "platform" and not self.platform:
+            raise ValueError("单平台任务必须指定 platform")
+        if self.scope == "all":
+            self.platform = None
+        return self
+
+
+class AdminCrawlerTaskResponse(BaseModel):
+    """Stable polling snapshot returned to the administrator UI."""
+
+    task_id: str
+    scope: Literal["platform", "all"]
+    platform: str | None = None
+    actor_id: int
+    status: Literal["queued", "running", "completed", "failed"]
+    phase: str
+    progress: int = Field(ge=0, le=100)
+    message: str
+    current_platform: str | None = None
+    completed_platforms: int = 0
+    total_platforms: int = 0
+    result: dict | None = None
+    error: str | None = None
+    created_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class AdminCrawlerOverviewResponse(BaseModel):
+    """Registry, schedule and recent execution state for the operations page."""
+
+    platforms: list[str]
+    schedules: dict[str, str]
+    scheduler_running: bool
+    jobs: list[dict]
+    recent_runs: list[dict]
