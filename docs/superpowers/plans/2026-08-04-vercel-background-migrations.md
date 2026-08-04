@@ -4,7 +4,7 @@
 
 **Goal:** Make the Vercel container listen on `$PORT` before synchronizing the database, while refusing business traffic until migrations finish.
 
-**Architecture:** The shell entrypoint starts `vercel_migrations.py` in the background and immediately execs Uvicorn. The migration runner creates a readiness file only after `revision --autogenerate` and `upgrade head` finish; an HTTP middleware returns `503` until that file exists.
+**Architecture:** The shell entrypoint starts `vercel_migrations.py` in the background and immediately execs Uvicorn. The migration runner creates a readiness file only after `revision --autogenerate` and `upgrade head` finish; an HTTP middleware conditionally waits for that file so Vercel keeps the first invocation active, then returns `503` only if the wait times out.
 
 **Tech Stack:** POSIX shell, Python 3.11, FastAPI/Starlette, Alembic, pytest
 
@@ -104,22 +104,22 @@ Expected: PASS.
 
 **Interfaces:**
 - Produces: `migrations_are_ready() -> bool`
-- HTTP contract before readiness: status `503`, JSON `{"status": "starting"}`, header `Retry-After: 1`
+- HTTP contract before readiness: conditionally wait for the marker; on timeout return status `503`, JSON `{"status": "starting"}`, header `Retry-After: 1`
 - HTTP contract after readiness: existing routes behave unchanged
 
 - [ ] **Step 1: Write the failing HTTP behavior test**
 
-With `VERCEL=1` and a temporary absent marker, call `/health` through `TestClient` and assert the `503` contract. Create the marker, call `/health` again, and assert the existing `200` response with `status == "ok"`.
+With `VERCEL=1` and a temporary absent marker, create the marker shortly after calling `/health` through `TestClient`; assert the request waits and returns the existing `200` response with `status == "ok"`. Add a short configured timeout case and assert the `503` contract.
 
 - [ ] **Step 2: Run the test to verify it fails**
 
-Run: `python -m pytest tests/test_vercel_deployment.py::test_vercel_returns_503_until_migrations_are_ready -q`
+Run: `python -m pytest tests/test_vercel_deployment.py -k "waits_for_migrations or migration_wait_times_out" -q`
 
 Expected: FAIL because `/health` currently returns `200` without checking migration readiness.
 
 - [ ] **Step 3: Implement the middleware**
 
-Add `migrations_are_ready()` using `VERCEL` and `VERCEL_MIGRATION_READY_FILE`. Register an outer HTTP middleware that returns `JSONResponse(..., status_code=503, headers={"Retry-After": "1"})` until the marker exists, then delegates to `call_next`.
+Add `migrations_are_ready()` and async `wait_for_migrations()` using `VERCEL`, `VERCEL_MIGRATION_READY_FILE`, and bounded wait/poll settings. Register an outer HTTP middleware that waits for readiness before delegating to `call_next`, returning `JSONResponse(..., status_code=503, headers={"Retry-After": "1"})` only after the wait times out.
 
 - [ ] **Step 4: Run the HTTP test and full deployment test module**
 

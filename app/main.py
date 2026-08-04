@@ -16,9 +16,11 @@ API 文档:
     用户与认证       ↔ /api/v1/auth/* + /api/v1/users/*
 """
 
+import asyncio
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from time import monotonic
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -46,6 +48,28 @@ def migrations_are_ready() -> bool:
         os.getenv("VERCEL_MIGRATION_READY_FILE", DEFAULT_MIGRATION_READY_FILE)
     )
     return ready_file.is_file()
+
+
+async def wait_for_migrations() -> bool:
+    if migrations_are_ready():
+        return True
+
+    wait_seconds = max(
+        float(os.getenv("VERCEL_MIGRATION_WAIT_SECONDS", "60")),
+        0,
+    )
+    poll_seconds = max(
+        float(os.getenv("VERCEL_MIGRATION_POLL_SECONDS", "0.1")),
+        0.001,
+    )
+    deadline = monotonic() + wait_seconds
+
+    while monotonic() < deadline:
+        await asyncio.sleep(min(poll_seconds, max(deadline - monotonic(), 0)))
+        if migrations_are_ready():
+            return True
+
+    return migrations_are_ready()
 
 
 @asynccontextmanager
@@ -121,7 +145,7 @@ app.add_middleware(AuthMiddleware)
 
 @app.middleware("http")
 async def require_ready_migrations(request: Request, call_next):
-    if not migrations_are_ready():
+    if not await wait_for_migrations():
         return JSONResponse(
             {"status": "starting"},
             status_code=503,

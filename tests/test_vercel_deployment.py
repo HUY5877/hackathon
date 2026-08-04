@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import threading
+import time
 
 import pytest
 from alembic.util.exc import CommandError
@@ -29,10 +31,37 @@ def test_vercel_skips_redundant_startup_database_probe(monkeypatch):
     assert should_probe_database_on_startup() is True
 
 
-def test_vercel_returns_503_until_migrations_are_ready(monkeypatch, tmp_path):
+def test_vercel_waits_for_migrations_before_serving_request(monkeypatch, tmp_path):
     ready_file = tmp_path / "migrations-ready"
     monkeypatch.setenv("VERCEL", "1")
     monkeypatch.setenv("VERCEL_MIGRATION_READY_FILE", str(ready_file))
+    monkeypatch.setenv("VERCEL_MIGRATION_WAIT_SECONDS", "1")
+    monkeypatch.setenv("VERCEL_MIGRATION_POLL_SECONDS", "0.01")
+
+    from app.main import app
+
+    marker_thread = threading.Thread(
+        target=lambda: (time.sleep(0.05), ready_file.touch()),
+        daemon=True,
+    )
+    marker_thread.start()
+
+    client = TestClient(app)
+    try:
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json()["status"] == "ok"
+    finally:
+        client.close()
+        marker_thread.join(timeout=1)
+
+
+def test_vercel_returns_503_when_migration_wait_times_out(monkeypatch, tmp_path):
+    ready_file = tmp_path / "migrations-ready"
+    monkeypatch.setenv("VERCEL", "1")
+    monkeypatch.setenv("VERCEL_MIGRATION_READY_FILE", str(ready_file))
+    monkeypatch.setenv("VERCEL_MIGRATION_WAIT_SECONDS", "0.02")
+    monkeypatch.setenv("VERCEL_MIGRATION_POLL_SECONDS", "0.005")
 
     from app.main import app
 
@@ -42,11 +71,6 @@ def test_vercel_returns_503_until_migrations_are_ready(monkeypatch, tmp_path):
         assert response.status_code == 503
         assert response.json() == {"status": "starting"}
         assert response.headers["Retry-After"] == "1"
-
-        ready_file.touch()
-        response = client.get("/health")
-        assert response.status_code == 200
-        assert response.json()["status"] == "ok"
     finally:
         client.close()
 
