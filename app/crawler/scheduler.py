@@ -17,6 +17,7 @@ from dataclasses import asdict
 from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
+from typing import Callable
 
 from app.config import settings
 from app.crawler.base import CrawlResult
@@ -66,6 +67,34 @@ CRAWL_SCHEDULE = {
 
 # 去重相似度阈值（高于此值视为重复）
 DEDUP_SIMILARITY_THRESHOLD = 0.85
+
+ProgressCallback = Callable[..., None]
+
+
+class CrawlerBusyError(RuntimeError):
+    """Raised when a scheduled or manual crawler already owns a target."""
+
+
+def _report_progress(
+    callback: ProgressCallback | None,
+    *,
+    progress: int,
+    phase: str,
+    message: str,
+    current_platform: str | None = None,
+    completed_platforms: int | None = None,
+    total_platforms: int | None = None,
+) -> None:
+    if callback is None:
+        return
+    callback(
+        progress=progress,
+        phase=phase,
+        message=message,
+        current_platform=current_platform,
+        completed_platforms=completed_platforms,
+        total_platforms=total_platforms,
+    )
 
 
 def _normalize_name(name: str) -> str:
@@ -205,7 +234,29 @@ class CrawlerScheduler:
         self._output_dir = Path(settings.CRAWLER_OUTPUT_DIR)
         self._output_dir.mkdir(parents=True, exist_ok=True)
 
-    async def run_platform(self, platform: str, save_json: bool = True, persist: bool = False) -> dict:
+        # Scheduled and manual runs share these locks.
+        self._platform_locks: dict[str, asyncio.Lock] = {}
+        self._all_lock = asyncio.Lock()
+
+    def _platform_lock(self, platform: str) -> asyncio.Lock:
+        return self._platform_locks.setdefault(platform, asyncio.Lock())
+
+    def is_platform_running(self, platform: str) -> bool:
+        return self._all_lock.locked() or self._platform_lock(platform).locked()
+
+    def any_platform_running(self) -> bool:
+        return any(lock.locked() for lock in self._platform_locks.values())
+
+    def is_all_running(self) -> bool:
+        return self._all_lock.locked()
+
+    async def run_platform(
+        self,
+        platform: str,
+        save_json: bool = True,
+        persist: bool = False,
+        progress_callback: ProgressCallback | None = None,
+    ) -> dict:
         """运行单个平台的爬取 + 清洗流水线
 
         Args:
@@ -217,20 +268,46 @@ class CrawlerScheduler:
         if crawler is None:
             return {"platform": platform, "status": "unknown", "count": 0}
 
+        lock = self._platform_lock(platform)
+        if self._all_lock.locked() or lock.locked():
+            raise CrawlerBusyError(f"平台 {platform} 正在运行")
+        await lock.acquire()
+
         logger.info(f"[Scheduler] 开始爬取平台: {platform}")
         start_time = datetime.now()
 
         try:
             # 1. 爬取原始数据
+            _report_progress(
+                progress_callback,
+                progress=15,
+                phase="fetching",
+                message=f"正在抓取 {platform}",
+                current_platform=platform,
+            )
             max_items = settings.CRAWLER_MAX_ITEMS_PER_PLATFORM or None
             raw_results: list[CrawlResult] = await crawler.run(max_items=max_items)
 
             # 2. LLM 清洗
+            _report_progress(
+                progress_callback,
+                progress=55,
+                phase="cleaning",
+                message=f"正在清洗 {platform}",
+                current_platform=platform,
+            )
             standardized: list[StandardizedHackathon] = await self.llm_processor.process_batch(raw_results)
 
             # 3. 持久化到数据库（可选）
             persistence_result = None
             if persist and standardized:
+                _report_progress(
+                    progress_callback,
+                    progress=80,
+                    phase="persisting",
+                    message=f"正在写入 {platform}",
+                    current_platform=platform,
+                )
                 try:
                     async with async_session_factory() as session:
                         persistence_result = await persist_batch(session, standardized)
@@ -241,6 +318,13 @@ class CrawlerScheduler:
                     persistence_result.errors.append(f"db_persistence_failed: {e}")
 
             # 4. 保存为 JSON
+            _report_progress(
+                progress_callback,
+                progress=95,
+                phase="saving",
+                message=f"正在完成 {platform}",
+                current_platform=platform,
+            )
             if save_json and standardized:
                 self._save_to_json(platform, standardized)
 
@@ -259,6 +343,15 @@ class CrawlerScheduler:
                 "persistence": persistence_result.to_dict() if persistence_result else None,
             }
             self._record_run(result)
+            _report_progress(
+                progress_callback,
+                progress=100,
+                phase="completed",
+                message=f"{platform} 爬取完成",
+                current_platform=platform,
+                completed_platforms=1,
+                total_platforms=1,
+            )
             return result
         except Exception as e:
             logger.error(f"[Scheduler] 平台 {platform} 爬取失败: {e}")
@@ -273,28 +366,89 @@ class CrawlerScheduler:
             self._record_run(result)
             await self._alert_failure(platform, str(e))
             return result
+        finally:
+            lock.release()
 
-    async def run_all_with_dedup(self, save_json: bool = True) -> dict:
+    async def run_all_with_dedup(
+        self,
+        save_json: bool = True,
+        progress_callback: ProgressCallback | None = None,
+    ) -> dict:
         """运行所有平台爬取 + 跨平台去重
 
         这是推荐的完整流水线：爬取 → 清洗 → 去重 → 保存
         """
+        if self._all_lock.locked():
+            raise CrawlerBusyError("全量爬虫任务正在运行")
+        await self._all_lock.acquire()
+        try:
+            if self.any_platform_running():
+                raise CrawlerBusyError("已有单平台爬虫任务正在运行")
+            return await self._run_all_with_dedup_locked(
+                save_json=save_json,
+                progress_callback=progress_callback,
+            )
+        finally:
+            self._all_lock.release()
+
+    async def _run_all_with_dedup_locked(
+        self,
+        *,
+        save_json: bool,
+        progress_callback: ProgressCallback | None,
+    ) -> dict:
         logger.info(f"[Scheduler] 全量爬取（含去重）开始 {datetime.now()}")
         start_time = datetime.now()
-        priority_order = ["dorahacks", "saikr", "tianchi", "devpost", "mlh", "eventbrite", "huodongxing"]
+        preferred_order = [
+            "dorahacks",
+            "saikr",
+            "tianchi",
+            "devpost",
+            "mlh",
+            "eventbrite",
+            "huodongxing",
+            "ethglobal",
+            "hackathon_com",
+            "itch_jams",
+        ]
+        priority_order = [name for name in preferred_order if name in CRAWLER_REGISTRY]
+        priority_order.extend(name for name in CRAWLER_REGISTRY if name not in priority_order)
 
         all_standardized: list[StandardizedHackathon] = []
         platform_results: list[dict] = []
+        total_platforms = len(priority_order)
 
-        for platform in priority_order:
+        for index, platform in enumerate(priority_order):
             crawler = CRAWLER_REGISTRY.get(platform)
             if crawler is None:
                 continue
 
             platform_start = datetime.now()
+            platform_lock = self._platform_lock(platform)
+            await platform_lock.acquire()
             try:
+                slice_start = 5 + int((index / max(total_platforms, 1)) * 80)
+                slice_middle = 5 + int(((index + 0.55) / max(total_platforms, 1)) * 80)
+                _report_progress(
+                    progress_callback,
+                    progress=slice_start,
+                    phase="fetching",
+                    message=f"正在抓取 {platform}",
+                    current_platform=platform,
+                    completed_platforms=index,
+                    total_platforms=total_platforms,
+                )
                 max_items = settings.CRAWLER_MAX_ITEMS_PER_PLATFORM or None
                 raw_results = await crawler.run(max_items=max_items)
+                _report_progress(
+                    progress_callback,
+                    progress=slice_middle,
+                    phase="cleaning",
+                    message=f"正在清洗 {platform}",
+                    current_platform=platform,
+                    completed_platforms=index,
+                    total_platforms=total_platforms,
+                )
                 standardized = await self.llm_processor.process_batch(raw_results)
                 all_standardized.extend(standardized)
 
@@ -315,12 +469,32 @@ class CrawlerScheduler:
                     "elapsed_seconds": round((datetime.now() - platform_start).total_seconds(), 1),
                 }
                 await self._alert_failure(platform, str(e))
+            finally:
+                platform_lock.release()
 
             platform_results.append(result)
             self._record_run(result)
+            completed_progress = 5 + int(((index + 1) / max(total_platforms, 1)) * 80)
+            _report_progress(
+                progress_callback,
+                progress=completed_progress,
+                phase="fetching",
+                message=f"已完成 {platform}",
+                current_platform=platform,
+                completed_platforms=index + 1,
+                total_platforms=total_platforms,
+            )
             await asyncio.sleep(1)
 
         # 跨平台去重
+        _report_progress(
+            progress_callback,
+            progress=88,
+            phase="deduplicating",
+            message="正在跨平台去重",
+            completed_platforms=total_platforms,
+            total_platforms=total_platforms,
+        )
         deduped, merged_records = deduplicate(all_standardized)
         logger.info(
             f"[Scheduler] 去重: {len(all_standardized)} → {len(deduped)} "
@@ -328,6 +502,14 @@ class CrawlerScheduler:
         )
 
         # 持久化到数据库
+        _report_progress(
+            progress_callback,
+            progress=94,
+            phase="persisting",
+            message="正在写入数据库",
+            completed_platforms=total_platforms,
+            total_platforms=total_platforms,
+        )
         persistence_result: PersistenceResult | None = None
         try:
             async with async_session_factory() as session:
@@ -338,13 +520,21 @@ class CrawlerScheduler:
             persistence_result = PersistenceResult()
             persistence_result.errors.append(f"db_persistence_failed: {e}")
 
+        _report_progress(
+            progress_callback,
+            progress=98,
+            phase="saving",
+            message="正在保存任务结果",
+            completed_platforms=total_platforms,
+            total_platforms=total_platforms,
+        )
         if save_json and deduped:
             self._save_to_json("all_deduped", deduped)
         if save_json and merged_records:
             self._save_dedup_log(merged_records)
 
         total_elapsed = (datetime.now() - start_time).total_seconds()
-        return {
+        result = {
             "platforms": platform_results,
             "dedup": {
                 "before": len(all_standardized),
@@ -355,6 +545,15 @@ class CrawlerScheduler:
             "total_elapsed_seconds": round(total_elapsed, 1),
             "summary": self._build_summary(platform_results),
         }
+        _report_progress(
+            progress_callback,
+            progress=100,
+            phase="completed",
+            message="全量爬虫任务已完成",
+            completed_platforms=total_platforms,
+            total_platforms=total_platforms,
+        )
+        return result
 
     def _build_summary(self, results: list[dict]) -> dict:
         """构建运行汇总"""
