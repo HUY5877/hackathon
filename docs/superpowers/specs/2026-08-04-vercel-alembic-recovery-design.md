@@ -6,15 +6,18 @@ Vercel 容器省略普通服务器启动流程中的第一次 `alembic upgrade h
 
 ## 启动流程
 
-1. 执行 `alembic revision --autogenerate -m "auto"`。
-2. 执行 `alembic upgrade head`。
+1. 在同一个 Python 进程中执行等价于 `alembic revision --autogenerate -m "auto"` 的操作。
+2. 在同一进程中继续执行等价于 `alembic upgrade head` 的操作。
 3. 启动 Uvicorn。
+
+两个 Alembic 操作共享解释器和已导入模块，以减少远程数据库冷启动期间的重复开销；执行顺序、Alembic 配置和数据库语义保持不变。
 
 两个 Alembic 步骤统一检查执行结果：若失败输出包含 `Can't locate revision identified by`，输出明确警告并继续；其他数据库连接、权限、差异生成或迁移代码错误仍直接退出容器。
 
 ## 修改范围
 
-- 仅修改 `entrypoint.vercel.sh` 及其自动化测试。
+- 迁移编排放在 `vercel_migrations.py`，`entrypoint.vercel.sh` 只调用一次 Python 迁移进程后启动 Uvicorn。
+- 自动化测试同时约束入口调用方式、迁移顺序和错误处理边界。
 - 不修改、删除或提交工作区现有的 `alembic/versions/*.py` 未跟踪文件。
 - 不修改普通 Docker Compose 的服务配置。
 - Vercel 环境变量和数据库连接保持当前配置。

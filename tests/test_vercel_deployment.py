@@ -1,7 +1,11 @@
+import importlib.util
 import os
 from pathlib import Path
 import shutil
 import subprocess
+
+import pytest
+from alembic.util.exc import CommandError
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -28,7 +32,7 @@ def test_vercel_entrypoint_generates_then_applies_migrations_and_uses_vercel_por
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
 
-    for command in ("alembic", "uvicorn"):
+    for command in ("python", "uvicorn"):
         executable = fake_bin / command
         executable.write_text(
             '#!/bin/sh\nprintf \'%s %s\\n\' "$(basename "$0")" "$*" >> "$CALL_LOG"\n',
@@ -54,77 +58,68 @@ def test_vercel_entrypoint_generates_then_applies_migrations_and_uses_vercel_por
     assert result.returncode == 0, result.stderr
 
     assert call_log.read_text(encoding="utf-8").splitlines() == [
-        "alembic revision --autogenerate -m auto",
-        "alembic upgrade head",
+        "python vercel_migrations.py",
         "uvicorn app.main:app --host 0.0.0.0 --port 4317",
     ]
 
 
-def _run_entrypoint_with_alembic_failure(tmp_path, error_message, exit_code):
-    call_log = tmp_path / "calls.log"
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
+def _load_vercel_migrations_module():
+    module_path = PROJECT_ROOT / "vercel_migrations.py"
+    spec = importlib.util.spec_from_file_location("vercel_migrations", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-    alembic = fake_bin / "alembic"
-    alembic.write_text(
-        "#!/bin/sh\n"
-        "printf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$CALL_LOG\"\n"
-        f"printf '%s\\n' \"{error_message}\" >&2\n"
-        f"exit {exit_code}\n",
-        encoding="utf-8",
+
+def test_vercel_migration_runner_generates_then_applies(monkeypatch):
+    module = _load_vercel_migrations_module()
+    calls = []
+
+    monkeypatch.setattr(
+        module.command,
+        "revision",
+        lambda config, **kwargs: calls.append(("revision", kwargs)),
     )
-    alembic.chmod(0o755)
-
-    uvicorn = fake_bin / "uvicorn"
-    uvicorn.write_text(
-        '#!/bin/sh\nprintf \'%s %s\\n\' "$(basename "$0")" "$*" >> "$CALL_LOG"\n',
-        encoding="utf-8",
-    )
-    uvicorn.chmod(0o755)
-
-    env = os.environ.copy()
-    env["CALL_LOG"] = str(call_log).replace("\\", "/")
-    env["PORT"] = "4317"
-    env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
-
-    result = subprocess.run(
-        [_find_posix_shell(), str(PROJECT_ROOT / "entrypoint.vercel.sh")],
-        cwd=PROJECT_ROOT,
-        env=env,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    calls = call_log.read_text(encoding="utf-8").splitlines()
-    return result, calls
-
-
-def test_vercel_entrypoint_ignores_missing_revision_and_starts_server(tmp_path):
-    result, calls = _run_entrypoint_with_alembic_failure(
-        tmp_path,
-        "Can't locate revision identified by '985154533421'",
-        1,
+    monkeypatch.setattr(
+        module.command,
+        "upgrade",
+        lambda config, revision: calls.append(("upgrade", revision)),
     )
 
-    assert result.returncode == 0, result.stderr
-    assert result.stderr.count(
+    module.main()
+
+    assert calls == [
+        ("revision", {"autogenerate": True, "message": "auto"}),
+        ("upgrade", "head"),
+    ]
+
+
+def test_vercel_migration_runner_ignores_only_missing_revisions(
+    monkeypatch, capsys
+):
+    module = _load_vercel_migrations_module()
+
+    def missing_revision(*args, **kwargs):
+        raise CommandError("Can't locate revision identified by '985154533421'")
+
+    monkeypatch.setattr(module.command, "revision", missing_revision)
+    monkeypatch.setattr(module.command, "upgrade", missing_revision)
+
+    module.main()
+
+    assert capsys.readouterr().err.count(
         "WARNING: Ignoring missing Alembic revision and continuing."
     ) == 2
-    assert calls == [
-        "alembic revision --autogenerate -m auto",
-        "alembic upgrade head",
-        "uvicorn app.main:app --host 0.0.0.0 --port 4317",
-    ]
 
 
-def test_vercel_entrypoint_stops_on_other_alembic_errors(tmp_path):
-    result, calls = _run_entrypoint_with_alembic_failure(
-        tmp_path,
-        "connection refused",
-        2,
-    )
+def test_vercel_migration_runner_propagates_other_errors(monkeypatch):
+    module = _load_vercel_migrations_module()
 
-    assert result.returncode == 2
-    assert "Ignoring missing Alembic revision" not in result.stderr
-    assert calls == ["alembic revision --autogenerate -m auto"]
+    def connection_failure(*args, **kwargs):
+        raise CommandError("connection refused")
+
+    monkeypatch.setattr(module.command, "revision", connection_failure)
+
+    with pytest.raises(CommandError, match="connection refused"):
+        module.main()
