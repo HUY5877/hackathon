@@ -55,3 +55,5 @@ temp/
 
 # ── Alembic 数据库迁移（按需取消注释） ────
 # alembic/versions/
+# ── superpowers 内部规划文档(不进仓库) ────
+docs/superpowers/
