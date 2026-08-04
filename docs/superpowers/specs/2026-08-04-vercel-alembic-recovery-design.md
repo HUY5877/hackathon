@@ -12,11 +12,14 @@ Vercel 容器省略普通服务器启动流程中的第一次 `alembic upgrade h
 
 两个 Alembic 操作共享解释器和已导入模块，以减少远程数据库冷启动期间的重复开销；执行顺序、Alembic 配置和数据库语义保持不变。
 
+`vercel.json` 将容器计算区域固定为香港 `hkg1`，使运行时靠近位于中国大陆的 PostgreSQL，降低两个迁移步骤的数据库往返延迟。
+
 两个 Alembic 步骤统一检查执行结果：若失败输出包含 `Can't locate revision identified by`，输出明确警告并继续；其他数据库连接、权限、差异生成或迁移代码错误仍直接退出容器。
 
 ## 修改范围
 
 - 迁移编排放在 `vercel_migrations.py`，`entrypoint.vercel.sh` 只调用一次 Python 迁移进程后启动 Uvicorn。
+- `vercel.json` 仅配置单个运行区域 `hkg1`。
 - 自动化测试同时约束入口调用方式、迁移顺序和错误处理边界。
 - 不修改、删除或提交工作区现有的 `alembic/versions/*.py` 未跟踪文件。
 - 不修改普通 Docker Compose 的服务配置。

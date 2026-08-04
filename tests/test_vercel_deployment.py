@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
 import shutil
@@ -9,6 +10,12 @@ from alembic.util.exc import CommandError
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_vercel_compute_runs_close_to_database():
+    config = json.loads((PROJECT_ROOT / "vercel.json").read_text(encoding="utf-8"))
+
+    assert config["regions"] == ["hkg1"]
 
 
 def _find_posix_shell() -> str:
