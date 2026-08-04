@@ -2,15 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Keep the server migration sequence in Vercel while allowing only Alembic missing-revision failures to be logged and ignored so Uvicorn can start.
+**Goal:** Remove Vercel's initial upgrade check while allowing only Alembic missing-revision failures to be logged and ignored so Uvicorn can start within the platform timeout.
 
-**Architecture:** Add one POSIX-shell wrapper around Alembic invocations in `entrypoint.vercel.sh`. The wrapper captures combined output, returns success only for the exact missing-revision error class, and preserves every other non-zero status; the three existing migration commands remain in their current order.
+**Architecture:** Add one POSIX-shell wrapper around Alembic invocations in `entrypoint.vercel.sh`. The wrapper captures combined output, returns success only for the exact missing-revision error class, and preserves every other non-zero status; Vercel runs autogenerate, then upgrade, then Uvicorn without the server flow's initial upgrade.
 
 **Tech Stack:** POSIX `sh`, Alembic CLI, Uvicorn, pytest, subprocess-based shell integration tests.
 
 ## Global Constraints
 
-- Preserve `alembic upgrade head → alembic revision --autogenerate -m "auto" → alembic upgrade head → Uvicorn`.
+- Use `alembic revision --autogenerate -m "auto" → alembic upgrade head → Uvicorn`.
 - Ignore only output containing `Can't locate revision identified by`.
 - Do not modify or commit untracked `alembic/versions/*.py` files.
 - Do not change Docker Compose or Vercel environment variables.
@@ -29,13 +29,13 @@
 
 - [ ] **Step 1: Write failing behavior tests**
 
-Add subprocess tests whose fake `alembic` executable either prints `Can't locate revision identified by '985154533421'` and exits 1, or prints `connection refused` and exits 2. Assert that the first case logs all three Alembic calls and Uvicorn, while the second case stops after the first Alembic call with exit code 2.
+Add subprocess tests whose fake `alembic` executable either prints `Can't locate revision identified by '985154533421'` and exits 1, or prints `connection refused` and exits 2. Assert that the first case logs autogenerate, upgrade, and Uvicorn without an initial upgrade, while the second case stops after autogenerate with exit code 2.
 
 - [ ] **Step 2: Run tests and verify RED**
 
 Run: `pytest tests/test_vercel_deployment.py -q`
 
-Expected: the missing-revision case exits before Uvicorn because `entrypoint.vercel.sh` currently uses `set -e` with direct Alembic calls.
+Expected: the expected command order fails while `entrypoint.vercel.sh` still contains the initial upgrade.
 
 - [ ] **Step 3: Implement the minimal wrapper**
 
@@ -66,7 +66,7 @@ run_alembic() {
 
 Run: `pytest tests/test_vercel_deployment.py -q`
 
-Expected: all Vercel deployment tests pass; the success path preserves the exact original order, the missing-revision path reaches Uvicorn, and a generic Alembic failure exits before Uvicorn.
+Expected: all Vercel deployment tests pass; the success path uses autogenerate then upgrade, the missing-revision path reaches Uvicorn, and a generic Alembic failure exits before Uvicorn.
 
 - [ ] **Step 5: Run full verification**
 

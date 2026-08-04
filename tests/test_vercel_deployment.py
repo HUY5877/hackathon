@@ -21,7 +21,9 @@ def _find_posix_shell() -> str:
     raise RuntimeError("A POSIX shell is required to test the Vercel entrypoint")
 
 
-def test_vercel_entrypoint_runs_migrations_in_order_and_uses_vercel_port(tmp_path):
+def test_vercel_entrypoint_generates_then_applies_migrations_and_uses_vercel_port(
+    tmp_path,
+):
     call_log = tmp_path / "calls.log"
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -52,7 +54,6 @@ def test_vercel_entrypoint_runs_migrations_in_order_and_uses_vercel_port(tmp_pat
     assert result.returncode == 0, result.stderr
 
     assert call_log.read_text(encoding="utf-8").splitlines() == [
-        "alembic upgrade head",
         "alembic revision --autogenerate -m auto",
         "alembic upgrade head",
         "uvicorn app.main:app --host 0.0.0.0 --port 4317",
@@ -109,9 +110,8 @@ def test_vercel_entrypoint_ignores_missing_revision_and_starts_server(tmp_path):
     assert result.returncode == 0, result.stderr
     assert result.stderr.count(
         "WARNING: Ignoring missing Alembic revision and continuing."
-    ) == 3
+    ) == 2
     assert calls == [
-        "alembic upgrade head",
         "alembic revision --autogenerate -m auto",
         "alembic upgrade head",
         "uvicorn app.main:app --host 0.0.0.0 --port 4317",
@@ -127,4 +127,4 @@ def test_vercel_entrypoint_stops_on_other_alembic_errors(tmp_path):
 
     assert result.returncode == 2
     assert "Ignoring missing Alembic revision" not in result.stderr
-    assert calls == ["alembic upgrade head"]
+    assert calls == ["alembic revision --autogenerate -m auto"]

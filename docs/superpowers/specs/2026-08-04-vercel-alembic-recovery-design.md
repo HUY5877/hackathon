@@ -2,16 +2,15 @@
 
 ## 目标
 
-Vercel 容器与普通服务器保持相同的三步迁移顺序。若某一步仅因数据库指向镜像中不存在的 revision 而失败，记录警告并继续后续步骤及应用启动；不修改或重置数据库中的 Alembic 版本指针。
+Vercel 容器省略普通服务器启动流程中的第一次 `alembic upgrade head`，避免重复的缺失 revision 检查耗尽 15 秒端口启动期限。若后续步骤仅因数据库指向镜像中不存在的 revision 而失败，记录警告并继续应用启动；不修改或重置数据库中的 Alembic 版本指针。
 
 ## 启动流程
 
-1. 执行 `alembic upgrade head`。
-2. 执行 `alembic revision --autogenerate -m "auto"`。
-3. 再次执行 `alembic upgrade head`。
-4. 启动 Uvicorn。
+1. 执行 `alembic revision --autogenerate -m "auto"`。
+2. 执行 `alembic upgrade head`。
+3. 启动 Uvicorn。
 
-三个 Alembic 步骤统一检查执行结果：若失败输出包含 `Can't locate revision identified by`，输出明确警告并继续；其他数据库连接、权限、差异生成或迁移代码错误仍直接退出容器。
+两个 Alembic 步骤统一检查执行结果：若失败输出包含 `Can't locate revision identified by`，输出明确警告并继续；其他数据库连接、权限、差异生成或迁移代码错误仍直接退出容器。
 
 ## 修改范围
 
@@ -22,13 +21,13 @@ Vercel 容器与普通服务器保持相同的三步迁移顺序。若某一步�
 
 ## 错误与风险
 
-该流程不会修复缺失 revision。首次升级、autogenerate 和再次升级都可能因同一缺失 revision 被跳过，应用会在数据库 Schema 未与当前 models 对齐的情况下启动；依赖缺失表、字段或约束的 API 可能在运行时失败。用户已明确接受这一风险。
+该流程不会修复缺失 revision。autogenerate 和 upgrade 都可能因同一缺失 revision 被跳过，应用会在数据库 Schema 未与当前 models 对齐的情况下启动；依赖缺失表、字段或约束的 API 可能在运行时失败。用户已明确接受这一风险。
 
 当 Alembic 历史完整时，Vercel 多实例冷启动仍可能同时生成迁移。此次实现仅忽略已确认的缺失 revision 错误，不扩展为分布式迁移锁。
 
 ## 验证
 
-- 测试确认 `upgrade head → autogenerate → upgrade head → Uvicorn` 的服务器启动顺序不变。
+- 测试确认 Vercel 执行 `autogenerate → upgrade head → Uvicorn`，且不执行首次 `upgrade head`。
 - 测试确认仅缺失 revision 错误会被忽略，其他 Alembic 错误仍退出容器。
 - 运行完整测试套件。
 - 推送 `dev-vercel` 后重新部署 Preview，确认运行日志完成迁移且 `/health` 返回 200。

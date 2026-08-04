@@ -20,9 +20,6 @@ run_alembic() {
     fi
 }
 
-echo "Running database migrations..."
-run_alembic alembic upgrade head
-
 echo "Generating new migrations from current models..."
 run_alembic alembic revision --autogenerate -m "auto"
 
