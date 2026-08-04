@@ -1,0 +1,23 @@
+FROM python:3.11-slim-bookworm
+
+WORKDIR /app
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    CRAWLER_OUTPUT_DIR=/tmp/crawl_output
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gcc \
+    libpq-dev \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+RUN playwright install --with-deps chromium
+
+COPY . .
+COPY entrypoint.vercel.sh /entrypoint.vercel.sh
+RUN sed -i 's/\r$//' /entrypoint.vercel.sh && chmod +x /entrypoint.vercel.sh
+
+ENTRYPOINT ["/entrypoint.vercel.sh"]
