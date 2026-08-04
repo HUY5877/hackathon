@@ -10,6 +10,7 @@ import time
 import pytest
 from alembic.util.exc import CommandError
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -159,6 +160,8 @@ def test_vercel_migration_runner_generates_then_applies(monkeypatch, tmp_path):
     calls = []
     ready_file = tmp_path / "migrations-ready"
     monkeypatch.setenv("VERCEL_MIGRATION_READY_FILE", str(ready_file))
+    monkeypatch.setenv("VERCEL_DB_CONNECT_TIMEOUT", "7")
+    monkeypatch.delenv("PGCONNECT_TIMEOUT", raising=False)
 
     monkeypatch.setattr(
         module.command,
@@ -177,7 +180,24 @@ def test_vercel_migration_runner_generates_then_applies(monkeypatch, tmp_path):
         ("revision", {"autogenerate": True, "message": "auto"}),
         ("upgrade", "head"),
     ]
+    assert os.environ["PGCONNECT_TIMEOUT"] == "7"
     assert ready_file.is_file()
+
+
+def test_vercel_migration_runner_retries_transient_database_errors(monkeypatch):
+    module = _load_vercel_migrations_module()
+    attempts = []
+    monkeypatch.setenv("VERCEL_MIGRATION_DB_RETRIES", "3")
+    monkeypatch.setenv("VERCEL_MIGRATION_DB_RETRY_DELAY", "0")
+
+    def flaky_connection():
+        attempts.append("attempt")
+        if len(attempts) < 3:
+            raise OperationalError("connect", {}, Exception("timed out"))
+
+    module._run_alembic(flaky_connection)
+
+    assert attempts == ["attempt", "attempt", "attempt"]
 
 
 def test_vercel_migration_runner_ignores_only_missing_revisions(
