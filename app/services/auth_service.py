@@ -4,64 +4,11 @@
 `async with async_session_factory()` 自管会话，路由/依赖无需注入 db。
 """
 
-from datetime import datetime
-
 from sqlalchemy import select, or_
 
 from app.db.session import async_session_factory
 from app.models.user import User, UserRole
 from app.core import security
-
-# ── 遗留 Mock 数据（兼容垫片）────────────────────────────────────────
-# recommendation_service / edm_service / user_service 仍是 Mock 实现，
-# 它们 `from app.services.auth_service import MOCK_USERS`。auth 已改为真实 DB，
-# 这里保留该列表仅为让上述 Mock 模块继续工作（零回归）；待其迁移到 DB 后删除。
-MOCK_USERS: list[dict] = [
-    {
-        "id": 1,
-        "email": "developer@example.com",
-        "username": "DevXiaoWang",
-        "hashed_password": "$2b$12$mock_hashed_password_123456",
-        "role": "developer",
-        "profile_tags": {
-            "tech_stack": ["Python", "React", "Solidity"],
-            "interests": ["AI", "Web3"],
-            "status": "student",
-            "experience_level": "intermediate",
-        },
-        "edm_subscribed": True,
-        "email_verified": True,
-        "created_at": datetime(2026, 5, 15, 10, 30),
-    },
-    {
-        "id": 2,
-        "email": "newbie@example.com",
-        "username": "NewbieXiaoLi",
-        "hashed_password": "$2b$12$mock_hashed_password_789012",
-        "role": "developer",
-        "profile_tags": {
-            "tech_stack": ["JavaScript", "HTML/CSS"],
-            "interests": ["Web Development", "AI"],
-            "status": "student",
-            "experience_level": "beginner",
-        },
-        "edm_subscribed": False,
-        "email_verified": True,
-        "created_at": datetime(2026, 5, 20, 14, 0),
-    },
-    {
-        "id": 3,
-        "email": "admin@example.com",
-        "username": "Admin",
-        "hashed_password": "$2b$12$mock_hashed_password_admin",
-        "role": "admin",
-        "profile_tags": None,
-        "edm_subscribed": True,
-        "email_verified": True,
-        "created_at": datetime(2026, 5, 1, 9, 0),
-    },
-]
-
 
 def _to_dict(user: User) -> dict:
     """ORM User → dict，字段对齐 UserProfileResponse（含 hashed_password 供内部用）。"""

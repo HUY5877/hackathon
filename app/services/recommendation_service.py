@@ -3,7 +3,7 @@
 基于用户画像标签与赛事标签的匹配运算
 """
 
-from app.services.auth_service import MOCK_USERS
+from app.services.auth_service import auth_service
 from app.services.hackathon_service import hackathon_service
 
 
@@ -13,11 +13,7 @@ class RecommendationService:
     @staticmethod
     async def get_personalized_recommendations(user_id: int, limit: int = 5) -> list[dict]:
         """基于用户画像标签匹配推荐赛事 — 对应 PRD「猜你适合」版块"""
-        user = None
-        for u in MOCK_USERS:
-            if u["id"] == user_id:
-                user = u
-                break
+        user = await auth_service.get_user_by_id(user_id) if user_id else None
 
         if not user or not user.get("profile_tags"):
             # 无画像 → 返回热门赛事
