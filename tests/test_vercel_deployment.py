@@ -18,6 +18,16 @@ def test_vercel_compute_runs_close_to_database():
     assert config["regions"] == ["hkg1"]
 
 
+def test_vercel_skips_redundant_startup_database_probe(monkeypatch):
+    from app.main import should_probe_database_on_startup
+
+    monkeypatch.setenv("VERCEL", "1")
+    assert should_probe_database_on_startup() is False
+
+    monkeypatch.delenv("VERCEL")
+    assert should_probe_database_on_startup() is True
+
+
 def _find_posix_shell() -> str:
     shell = shutil.which("sh")
     if shell:

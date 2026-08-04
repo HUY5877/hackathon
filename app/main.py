@@ -16,6 +16,7 @@ API 文档:
     用户与认证       ↔ /api/v1/auth/* + /api/v1/users/*
 """
 
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -29,6 +30,10 @@ from app.crawler.apscheduler_manager import scheduler_manager
 from app.crawler.logging_config import setup_logging
 
 
+def should_probe_database_on_startup() -> bool:
+    return os.getenv("VERCEL") != "1"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """应用生命周期管理"""
@@ -38,14 +43,15 @@ async def lifespan(app: FastAPI):
     setup_logging(level="DEBUG" if settings.DEBUG else "INFO", format_type=log_format)
 
     # ── 启动时：测试数据库连接 ──
-    try:
-        from app.db.session import async_session_factory
-        from sqlalchemy import text
-        async with async_session_factory() as session:
-            await session.execute(text("SELECT 1"))
-        print(f"✅ 数据库连接成功: {settings.DATABASE_URL}")
-    except Exception as e:
-        print(f"❌ 数据库连接失败: {e}")
+    if should_probe_database_on_startup():
+        try:
+            from app.db.session import async_session_factory
+            from sqlalchemy import text
+            async with async_session_factory() as session:
+                await session.execute(text("SELECT 1"))
+            print(f"✅ 数据库连接成功: {settings.DATABASE_URL}")
+        except Exception as e:
+            print(f"❌ 数据库连接失败: {e}")
     # 建表交给 alembic 迁移流水线（entrypoint.sh: autogenerate + upgrade），
     # users 表由 app/models/user.py 的 User 模型经 alembic env.py 自动扫描建立，
     # 这里不再手动 create_all，避免两套建表逻辑并存。
