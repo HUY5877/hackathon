@@ -1,5 +1,7 @@
+import os
 import sys
 from collections.abc import Callable
+from pathlib import Path
 
 from alembic import command
 from alembic.config import Config
@@ -7,6 +9,7 @@ from alembic.util.exc import CommandError
 
 
 MISSING_REVISION_MESSAGE = "Can't locate revision identified by"
+DEFAULT_READY_FILE = "/tmp/vercel-migrations-ready"
 
 
 def _run_alembic(operation: Callable[[], None]) -> None:
@@ -23,6 +26,13 @@ def _run_alembic(operation: Callable[[], None]) -> None:
         )
 
 
+def mark_migrations_ready() -> None:
+    ready_file = Path(
+        os.getenv("VERCEL_MIGRATION_READY_FILE", DEFAULT_READY_FILE)
+    )
+    ready_file.touch()
+
+
 def main() -> None:
     config = Config("alembic.ini")
 
@@ -33,6 +43,9 @@ def main() -> None:
 
     print("Applying generated migrations...", flush=True)
     _run_alembic(lambda: command.upgrade(config, "head"))
+
+    mark_migrations_ready()
+    print("Database migrations are ready.", flush=True)
 
 
 if __name__ == "__main__":

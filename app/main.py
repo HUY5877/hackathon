@@ -18,9 +18,11 @@ API 文档:
 
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.config import settings
 from app.api.v1.router import router as api_v1_router
@@ -30,8 +32,20 @@ from app.crawler.apscheduler_manager import scheduler_manager
 from app.crawler.logging_config import setup_logging
 
 
+DEFAULT_MIGRATION_READY_FILE = "/tmp/vercel-migrations-ready"
+
+
 def should_probe_database_on_startup() -> bool:
     return os.getenv("VERCEL") != "1"
+
+
+def migrations_are_ready() -> bool:
+    if os.getenv("VERCEL") != "1":
+        return True
+    ready_file = Path(
+        os.getenv("VERCEL_MIGRATION_READY_FILE", DEFAULT_MIGRATION_READY_FILE)
+    )
+    return ready_file.is_file()
 
 
 @asynccontextmanager
@@ -103,6 +117,17 @@ app.add_middleware(
 
 # ── 认证中间件 ───────────────────────────
 app.add_middleware(AuthMiddleware)
+
+
+@app.middleware("http")
+async def require_ready_migrations(request: Request, call_next):
+    if not migrations_are_ready():
+        return JSONResponse(
+            {"status": "starting"},
+            status_code=503,
+            headers={"Retry-After": "1"},
+        )
+    return await call_next(request)
 
 # ── 注册路由 ─────────────────────────────
 app.include_router(api_v1_router)
