@@ -99,6 +99,7 @@ async def list_hackathons(
     keyword: str | None = Query(default=None),
     source_platform: str | None = Query(default=None),
     status: Literal["upcoming", "registering", "ongoing", "ended"] | None = Query(default=None),
+    display_status: Literal["pending", "approved", "rejected"] | None = Query(default=None),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
 ):
@@ -106,6 +107,7 @@ async def list_hackathons(
         keyword=keyword,
         source_platform=source_platform,
         status=status,
+        display_status=display_status,
         page=page,
         page_size=page_size,
     )

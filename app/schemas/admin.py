@@ -52,6 +52,7 @@ class AdminHackathonUpdate(BaseModel):
     sponsors: list[str] | None = None
     cover_image: str | None = Field(default=None, max_length=1000)
     is_verified: bool | None = None
+    display_status: Literal["pending", "approved", "rejected"] | None = None
 
     model_config = ConfigDict(extra="forbid")
 
@@ -73,7 +74,7 @@ class AdminHackathonUpdate(BaseModel):
             if self.name is None or not self.name.strip():
                 raise ValueError("赛事名称不能为空")
             self.name = self.name.strip()
-        for required_field in ("status", "mode", "is_verified"):
+        for required_field in ("status", "mode", "is_verified", "display_status"):
             if required_field in self.model_fields_set and getattr(self, required_field) is None:
                 raise ValueError(f"{required_field} 不能为空")
         if (
@@ -131,6 +132,7 @@ class AdminHackathonResponse(BaseModel):
     cover_image: str | None = None
     is_verified: bool
     llm_confidence: float | None = None
+    display_status: Literal["pending", "approved", "rejected"]
     view_count: int
     external_click_count: int
     created_at: datetime

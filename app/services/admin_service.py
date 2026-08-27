@@ -4,7 +4,12 @@ from sqlalchemy import and_, func, or_, select
 
 from app.db.session import async_session_factory
 from app.models.user import User, UserRole
-from app.models.hackathon import Hackathon, HackathonMode, HackathonStatus
+from app.models.hackathon import (
+    Hackathon,
+    HackathonDisplayStatus,
+    HackathonMode,
+    HackathonStatus,
+)
 
 
 class AdminNotFoundError(LookupError):
@@ -34,6 +39,11 @@ def _admin_user_dict(user: User) -> dict:
 def _admin_hackathon_dict(hackathon: Hackathon) -> dict:
     status = hackathon.status.value if hasattr(hackathon.status, "value") else hackathon.status
     mode = hackathon.mode.value if hasattr(hackathon.mode, "value") else hackathon.mode
+    display_status = (
+        hackathon.display_status.value
+        if hasattr(hackathon.display_status, "value")
+        else hackathon.display_status
+    )
     return {
         "id": hackathon.id,
         "name": hackathon.name,
@@ -62,6 +72,7 @@ def _admin_hackathon_dict(hackathon: Hackathon) -> dict:
         "cover_image": hackathon.cover_image,
         "is_verified": hackathon.is_verified,
         "llm_confidence": hackathon.llm_confidence,
+        "display_status": display_status,
         "view_count": hackathon.view_count,
         "external_click_count": hackathon.external_click_count,
         "created_at": hackathon.created_at,
@@ -126,6 +137,7 @@ class AdminService:
         keyword: str | None = None,
         source_platform: str | None = None,
         status: str | None = None,
+        display_status: str | None = None,
         page: int = 1,
         page_size: int = 20,
     ) -> tuple[list[dict], int]:
@@ -144,6 +156,10 @@ class AdminService:
             conditions.append(Hackathon.source_platform == source_platform)
         if status:
             conditions.append(Hackathon.status == HackathonStatus(status))
+        if display_status:
+            conditions.append(
+                Hackathon.display_status == HackathonDisplayStatus(display_status)
+            )
 
         query = select(Hackathon)
         count_query = select(func.count(Hackathon.id))
@@ -190,6 +206,10 @@ class AdminService:
                 converted["status"] = HackathonStatus(converted["status"])
             if "mode" in converted:
                 converted["mode"] = HackathonMode(converted["mode"])
+            if "display_status" in converted:
+                converted["display_status"] = HackathonDisplayStatus(
+                    converted["display_status"]
+                )
 
             effective_registration_start = converted.get(
                 "registration_start", hackathon.registration_start

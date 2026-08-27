@@ -25,6 +25,14 @@ class HackathonStatus(str, enum.Enum):
     ENDED = "ended"             # 已结束
 
 
+class HackathonDisplayStatus(str, enum.Enum):
+    """LLM 质量筛选状态；只有 APPROVED 赛事可在公共接口展示。"""
+
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+
+
 # 跨数据库兼容的列表类型：PostgreSQL 用 ARRAY，其他用 JSON
 ListStrType = JSON().with_variant(ARRAY(String), "postgresql")
 
@@ -84,6 +92,13 @@ class Hackathon(Base):
     is_verified: Mapped[bool] = mapped_column(Boolean, default=False)  # 是否经人工审核
     llm_confidence: Mapped[float | None] = mapped_column(Float, nullable=True)  # LLM 提取置信度
     raw_data: Mapped[dict | None] = mapped_column(JSON, nullable=True)  # 原始抓取数据（备份）
+    display_status: Mapped[HackathonDisplayStatus] = mapped_column(
+        Enum(HackathonDisplayStatus),
+        default=HackathonDisplayStatus.PENDING,
+        server_default="PENDING",
+        nullable=False,
+        index=True,
+    )
 
     # ── 平台统计 ──────────────────────────────
     view_count: Mapped[int] = mapped_column(default=0)

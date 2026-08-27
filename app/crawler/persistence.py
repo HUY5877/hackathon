@@ -37,6 +37,7 @@ class PersistenceResult:
         self.skipped = 0
         self.errors: list[str] = []
         self.total = 0
+        self.event_ids: list[int] = []
 
     def to_dict(self) -> dict:
         return {
@@ -173,6 +174,7 @@ async def persist_batch(
 
     # 2. 查询所有已存在 slug（用于新插入时的唯一性检查）
     existing_slugs = await _fetch_existing_slugs(session)
+    persisted_events: list[Hackathon] = []
 
     # 3. 逐条处理
     for item in items:
@@ -194,6 +196,7 @@ async def persist_batch(
                 existing = existing_map[item.source_url]
                 new_orm = to_hackathon_orm(item, existing_slugs=existing_slugs)
                 changed = _merge_existing(existing, new_orm)
+                persisted_events.append(existing)
                 if changed:
                     result.updated += 1
                 else:
@@ -204,6 +207,7 @@ async def persist_batch(
             new_orm = to_hackathon_orm(item, existing_slugs=existing_slugs)
             existing_slugs.add(new_orm.slug)
             session.add(new_orm)
+            persisted_events.append(new_orm)
             result.inserted += 1
 
         except Exception as e:
@@ -212,9 +216,14 @@ async def persist_batch(
 
     # 4. 提交事务
     try:
+        await session.flush()
         await session.commit()
+        result.event_ids = sorted(
+            {event.id for event in persisted_events if event.id is not None}
+        )
     except Exception as e:
         await session.rollback()
+        result.event_ids = []
         logger.error(f"[persistence] 批量提交失败: {e}")
         result.errors.append(f"commit_failed: {e}")
 

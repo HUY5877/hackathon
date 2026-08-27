@@ -27,6 +27,7 @@ from app.middleware.auth_middleware import AuthMiddleware
 from app.crawler.scheduler import scheduler
 from app.crawler.apscheduler_manager import scheduler_manager
 from app.crawler.logging_config import setup_logging
+from app.crawler.screening_worker import screening_worker
 
 
 @asynccontextmanager
@@ -54,7 +55,15 @@ async def lifespan(app: FastAPI):
     print(f"📡 API 文档: http://{settings.HOST}:{settings.PORT}/docs")
     print(f"🔧 Debug 模式: {settings.DEBUG}")
 
-    # 启动 APScheduler 定时爬虫任务
+    # 先启动异步质量筛选 worker，再启动爬虫和 pending 补扫定时任务。
+    try:
+        await screening_worker.start()
+    except Exception as e:
+        print(f"⚠️ 大模型筛选 worker 启动失败: {e}")
+    try:
+        await screening_worker.scan_pending()
+    except Exception as e:
+        print(f"⚠️ 未筛选赛事首次补扫失败: {e}")
     try:
         scheduler_manager.start()
         print(f"⏰ 定时爬虫已启动，共 {len(scheduler_manager.get_jobs())} 个任务")
@@ -66,6 +75,7 @@ async def lifespan(app: FastAPI):
     # ── 关闭时 ──
     print("🛑 应用关闭中...")
     scheduler_manager.stop()
+    await screening_worker.stop()
 
 
 app = FastAPI(

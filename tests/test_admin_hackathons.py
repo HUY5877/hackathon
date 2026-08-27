@@ -47,6 +47,7 @@ HACKATHON = {
     "cover_image": "https://example.com/cover.png",
     "is_verified": False,
     "llm_confidence": 0.92,
+    "display_status": "approved",
     "view_count": 12,
     "external_click_count": 3,
     "created_at": datetime(2026, 8, 2, 10, 0),
@@ -90,6 +91,7 @@ def test_list_hackathons_returns_paginated_management_records(monkeypatch):
             "keyword": "agent",
             "source_platform": "devpost",
             "status": "registering",
+            "display_status": None,
             "page": 1,
             "page_size": 20,
         }

@@ -6,7 +6,12 @@
 """
 
 from app.models.user import User, UserRole
-from app.models.hackathon import Hackathon, HackathonMode, HackathonStatus
+from app.models.hackathon import (
+    Hackathon,
+    HackathonDisplayStatus,
+    HackathonMode,
+    HackathonStatus,
+)
 from app.models.inspiration import InspirationItem, UserInteraction
 from app.models.empowerment import EmpowermentArticle, ContentType
 
@@ -14,6 +19,7 @@ __all__ = [
     "User",
     "UserRole",
     "Hackathon",
+    "HackathonDisplayStatus",
     "HackathonMode",
     "HackathonStatus",
     "InspirationItem",

@@ -22,6 +22,8 @@ from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 
 from app.crawler.scheduler import scheduler as crawler_scheduler, CRAWL_SCHEDULE
+from app.crawler.screening_worker import screening_worker
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +101,23 @@ class SchedulerManager:
         )
         logger.info("[SchedulerManager] 注册全量去重任务: 每日 06:00")
 
+        # 周期补扫数据库中的 pending 赛事。队列仅负责低延迟，数据库状态负责故障恢复。
+        self._scheduler.add_job(
+            self._scan_pending_screening_safe,
+            trigger=IntervalTrigger(
+                seconds=max(1, settings.LLM_SCREENING_SCAN_INTERVAL_SECONDS)
+            ),
+            id="scan_pending_hackathons",
+            name="补扫未筛选赛事",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=300,
+        )
+        logger.info(
+            "[SchedulerManager] 注册未筛选赛事补扫任务: 每 %s 秒",
+            settings.LLM_SCREENING_SCAN_INTERVAL_SECONDS,
+        )
+
         self._scheduler.start()
         self._started = True
         logger.info(f"[SchedulerManager] 启动完成，共 {len(self._scheduler.get_jobs())} 个任务")
@@ -125,6 +144,14 @@ class SchedulerManager:
         except Exception as e:
             logger.exception(f"[SchedulerManager] 全量去重任务异常: {e}")
             return {"status": "error", "error": str(e)}
+
+    async def _scan_pending_screening_safe(self):
+        """补扫未筛选赛事，失败不影响其他定时任务。"""
+        try:
+            return await screening_worker.scan_pending()
+        except Exception as e:
+            logger.exception(f"[SchedulerManager] 未筛选赛事补扫异常: {e}")
+            return 0
 
     def stop(self):
         """停止调度器"""

@@ -36,6 +36,11 @@ class Settings(BaseSettings):
     LLM_API_KEY: str = ""
     LLM_API_BASE_URL: str = "https://api.openai.com/v1"
     LLM_MODEL: str = "gpt-4o-mini"
+    LLM_SCREENING_API_BASE_URL: str = "https://api.stepfun.com/step_plan"
+    LLM_SCREENING_MODEL: str = "step-explore"
+    LLM_SCREENING_WORKERS: int = 2
+    LLM_SCREENING_BATCH_SIZE: int = 100
+    LLM_SCREENING_SCAN_INTERVAL_SECONDS: int = 300
 
     # ── 邮件服务（EDM） ───────────────────────
     SMTP_HOST: str = "smtp.example.com"

@@ -67,7 +67,12 @@ def _seed_hackathons():
     """
     import asyncio
     from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
-    from app.models.hackathon import Hackathon, HackathonStatus, HackathonMode
+    from app.models.hackathon import (
+        Hackathon,
+        HackathonDisplayStatus,
+        HackathonMode,
+        HackathonStatus,
+    )
 
     async def _run():
         eng = create_async_engine(os.environ["DATABASE_URL"])
@@ -76,12 +81,14 @@ def _seed_hackathons():
                 name="AI Agents Hack", slug="ai-agents-hack",
                 source_url="https://x/ai", source_platform="devpost",
                 status=HackathonStatus.ENDED, mode=HackathonMode.ONLINE,
+                display_status=HackathonDisplayStatus.APPROVED,
                 track_tags=["AI"], tech_tags=["Python"], view_count=100,
             ))
             s.add(Hackathon(
                 name="Retro Gaming Jam", slug="retro-gaming-jam",
                 source_url="https://x/game", source_platform="devpost",
                 status=HackathonStatus.REGISTERING, mode=HackathonMode.ONLINE,
+                display_status=HackathonDisplayStatus.APPROVED,
                 track_tags=["Gaming"], tech_tags=["C++"], view_count=0,
             ))
             await s.commit()

@@ -33,6 +33,7 @@ from app.crawler.hackathon_com import hackathon_com_crawler
 from app.crawler.itch_jams import itch_jams_crawler
 from app.crawler.llm_processor import LLMProcessor, StandardizedHackathon
 from app.crawler.persistence import persist_batch, PersistenceResult
+from app.crawler.screening_worker import screening_worker
 from app.db import async_session_factory
 
 logger = logging.getLogger(__name__)
@@ -311,6 +312,7 @@ class CrawlerScheduler:
                 try:
                     async with async_session_factory() as session:
                         persistence_result = await persist_batch(session, standardized)
+                    screening_worker.enqueue(persistence_result.event_ids)
                     logger.info(f"[Scheduler] {platform} 持久化: {persistence_result}")
                 except Exception as e:
                     logger.error(f"[Scheduler] {platform} 持久化失败: {e}")
@@ -514,6 +516,7 @@ class CrawlerScheduler:
         try:
             async with async_session_factory() as session:
                 persistence_result = await persist_batch(session, deduped)
+            screening_worker.enqueue(persistence_result.event_ids)
             logger.info(f"[Scheduler] 持久化完成: {persistence_result}")
         except Exception as e:
             logger.error(f"[Scheduler] 持久化失败（不影响 JSON 保存）: {e}")

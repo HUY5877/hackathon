@@ -10,7 +10,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db.session import async_session_factory
-from app.models.hackathon import Hackathon, HackathonStatus, HackathonMode
+from app.models.hackathon import (
+    Hackathon,
+    HackathonDisplayStatus,
+    HackathonMode,
+    HackathonStatus,
+)
 
 
 class HackathonService:
@@ -35,7 +40,9 @@ class HackathonService:
             count_query = select(func.count(Hackathon.id))
 
             # ── 筛选条件 ──
-            conditions = []
+            conditions = [
+                Hackathon.display_status == HackathonDisplayStatus.APPROVED
+            ]
             if status:
                 conditions.append(Hackathon.status == status.upper())
             if mode:
@@ -92,7 +99,10 @@ class HackathonService:
         """获取黑客松详情"""
         async with async_session_factory() as session:
             result = await session.execute(
-                select(Hackathon).where(Hackathon.slug == slug)
+                select(Hackathon).where(
+                    Hackathon.slug == slug,
+                    Hackathon.display_status == HackathonDisplayStatus.APPROVED,
+                )
             )
             hackathon = result.scalar_one_or_none()
             if hackathon is None:
@@ -105,14 +115,20 @@ class HackathonService:
         async with async_session_factory() as session:
             await session.execute(
                 update(Hackathon)
-                .where(Hackathon.id == hackathon_id)
+                .where(
+                    Hackathon.id == hackathon_id,
+                    Hackathon.display_status == HackathonDisplayStatus.APPROVED,
+                )
                 .values(external_click_count=Hackathon.external_click_count + 1)
             )
             await session.commit()
 
             # 读取更新后的值
             result = await session.execute(
-                select(Hackathon.external_click_count).where(Hackathon.id == hackathon_id)
+                select(Hackathon.external_click_count).where(
+                    Hackathon.id == hackathon_id,
+                    Hackathon.display_status == HackathonDisplayStatus.APPROVED,
+                )
             )
             count = result.scalar() or 0
             return {"click_id": count, "hackathon_id": hackathon_id}
@@ -123,6 +139,7 @@ class HackathonService:
         async with async_session_factory() as session:
             result = await session.execute(
                 select(Hackathon)
+                .where(Hackathon.display_status == HackathonDisplayStatus.APPROVED)
                 .order_by(Hackathon.view_count.desc())
                 .limit(limit)
             )
