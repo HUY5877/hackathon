@@ -47,36 +47,27 @@ CLEANING_PROMPT = """你是赛事内容编辑。请在不改变事实含义的�
 1. 名称去掉网站标题、平台宣传语、重复后缀和无关营销文案，但必须保留赛事官方名称；
 2. 摘要控制在 200 字以内，准确说明赛事主题、参赛对象和核心信息；
 3. 描述删除导航栏、新闻推荐、课程广告、保研考研等无关抓取内容，去重并整理成清晰段落；
-4. 对当前缺失的事实字段，只能在现有字段或 raw_data 中有明确原文依据时补充，否则返回 null；
+4. 对当前缺失的事实字段，只能根据 raw_data 中同名或明确对应的结构化字段原值补充，不得根据描述正文猜测；
 5. 不得编造、推测或改写日期、金额、奖项、规则、主办方、地点、链接等事实；不得改变赛事真实含义；
 6. 不得修改 id、slug、source_url、source_platform、raw_data、状态、计数等系统字段。
 
 赛事数据：
 {event_json}
 
-只返回 JSON，字段结构如下：
+只返回简短 JSON。missing_fields 只允许 registration_start、registration_end、event_start、event_end、
+location、country、city、organizer、prize_pool、registration_url、cover_image；只放确实有结构化原值依据且
+当前缺失的字段，没有就返回空对象；不要输出值为 null 的字段：
 {{
   "name": "清洗后的官方赛事名称",
   "summary": "清洗后的简洁摘要",
   "description": "清洗后的赛事介绍，使用纯文本自然分段，不要输出 Markdown 或 HTML",
-  "missing_fields": {{
-    "registration_start": null,
-    "registration_end": null,
-    "event_start": null,
-    "event_end": null,
-    "location": null,
-    "country": null,
-    "city": null,
-    "organizer": null,
-    "prize_pool": null,
-    "registration_url": null,
-    "cover_image": null,
-    "track_tags": null,
-    "tech_tags": null,
-    "sponsors": null
-  }}
+  "missing_fields": {{}}
 }}
 """
+
+
+SCREENING_MAX_TOKENS = 4096
+CLEANING_MAX_TOKENS = 8192
 
 
 class ScreeningResponseError(ValueError):
@@ -124,7 +115,7 @@ class QualityScreeningClient:
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     json={
                         "model": self.model,
-                        "max_tokens": 1024,
+                        "max_tokens": SCREENING_MAX_TOKENS,
                         "messages": [
                             {
                                 "role": "user",
@@ -143,18 +134,34 @@ class QualityScreeningClient:
                     for block in content_blocks
                     if isinstance(block, dict) and block.get("type") == "text"
                 )
-
-                if not content and response_payload.get("stop_reason") == "max_tokens":
-                    raise ScreeningResponseError(
-                        "模型输出达到 max_tokens=1024，未生成文本结果"
-                    )
+                usage = response_payload.get("usage")
+                if not isinstance(usage, dict):
+                    usage = {}
+                content_types = [
+                    block.get("type")
+                    for block in content_blocks
+                    if isinstance(block, dict)
+                ]
 
             logger.info(
-                "[Screening] 模型响应：id=%s，名称=%s，内容=%s",
+                "[Screening] 模型响应：id=%s，名称=%s，模型=%s，"
+                "stop_reason=%s，input_tokens=%s，output_tokens=%s，"
+                "content_types=%s，内容=%s",
                 event.get("id"),
                 event.get("name"),
+                self.model,
+                response_payload.get("stop_reason"),
+                usage.get("input_tokens"),
+                usage.get("output_tokens"),
+                content_types,
                 json.dumps(content, ensure_ascii=False),
             )
+            if response_payload.get("stop_reason") == "max_tokens":
+                raise ScreeningResponseError(
+                    f"模型输出达到 max_tokens={SCREENING_MAX_TOKENS}，响应可能不完整"
+                )
+            if not content:
+                raise ScreeningResponseError("模型响应没有文本内容")
             parsed = _extract_json_from_text(content)
             if not isinstance(parsed, dict) or "approved" not in parsed:
                 raise ScreeningResponseError("模型响应缺少 approved 字段")
@@ -211,7 +218,7 @@ class EventCleaningClient:
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     json={
                         "model": self.model,
-                        "max_tokens": 4096,
+                        "max_tokens": CLEANING_MAX_TOKENS,
                         "messages": [
                             {
                                 "role": "user",
@@ -230,17 +237,34 @@ class EventCleaningClient:
                     for block in content_blocks
                     if isinstance(block, dict) and block.get("type") == "text"
                 )
-                if not content and response_payload.get("stop_reason") == "max_tokens":
-                    raise CleaningResponseError(
-                        "模型输出达到 max_tokens=4096，未生成文本结果"
-                    )
+                usage = response_payload.get("usage")
+                if not isinstance(usage, dict):
+                    usage = {}
+                content_types = [
+                    block.get("type")
+                    for block in content_blocks
+                    if isinstance(block, dict)
+                ]
 
             logger.info(
-                "[Cleaning] 模型响应：id=%s，名称=%s，内容=%s",
+                "[Cleaning] 模型响应：id=%s，名称=%s，模型=%s，"
+                "stop_reason=%s，input_tokens=%s，output_tokens=%s，"
+                "content_types=%s，内容=%s",
                 event.get("id"),
                 event.get("name"),
+                self.model,
+                response_payload.get("stop_reason"),
+                usage.get("input_tokens"),
+                usage.get("output_tokens"),
+                content_types,
                 json.dumps(content, ensure_ascii=False),
             )
+            if response_payload.get("stop_reason") == "max_tokens":
+                raise CleaningResponseError(
+                    f"模型输出达到 max_tokens={CLEANING_MAX_TOKENS}，响应可能不完整"
+                )
+            if not content:
+                raise CleaningResponseError("模型响应没有文本内容")
             parsed = _extract_json_from_text(content)
             if not isinstance(parsed, dict):
                 raise CleaningResponseError("模型响应不是 JSON 对象")
@@ -314,20 +338,84 @@ def _clean_string(value: Any, max_length: int) -> str | None:
     return cleaned[:max_length].strip()
 
 
-def _clean_string_list(value: Any) -> list[str] | None:
-    if not isinstance(value, list):
-        return None
-    cleaned = []
-    for item in value:
-        normalized = _clean_string(item, 100)
-        if normalized and normalized not in cleaned:
-            cleaned.append(normalized)
-    return cleaned[:20] or None
-
-
 def _is_http_url(value: str) -> bool:
     parsed = urlparse(value)
     return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+_RAW_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
+    "registration_start": ("registration_start",),
+    "registration_end": ("registration_end", "registration_deadline"),
+    "event_start": ("event_start",),
+    "event_end": ("event_end",),
+    "location": ("location",),
+    "country": ("country",),
+    "city": ("city",),
+    "organizer": ("organizer",),
+    "prize_pool": ("prize_pool", "prize"),
+    "registration_url": ("registration_url", "apply_url"),
+    "cover_image": ("cover_image",),
+}
+
+
+def _raw_values_for_field(raw_data: Any, field: str) -> list[Any]:
+    """Find values stored under an explicit matching key in raw crawler data."""
+    aliases = {alias.casefold() for alias in _RAW_FIELD_ALIASES.get(field, ())}
+    if not aliases:
+        return []
+
+    values: list[Any] = []
+
+    def visit(value: Any) -> None:
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                if str(key).casefold() in aliases:
+                    values.append(nested)
+                if isinstance(nested, (dict, list)):
+                    visit(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                if isinstance(nested, (dict, list)):
+                    visit(nested)
+
+    visit(raw_data)
+    return values
+
+
+def _normalized_evidence(value: Any) -> str:
+    if not isinstance(value, (str, int, float)):
+        return ""
+    return "".join(character.casefold() for character in str(value) if character.isalnum())
+
+
+def _has_matching_raw_evidence(event: Hackathon, field: str, proposed: Any) -> bool:
+    """Require exact-field raw evidence before accepting a missing factual value."""
+    raw_values = _raw_values_for_field(event.raw_data, field)
+    if field in {
+        "registration_start",
+        "registration_end",
+        "event_start",
+        "event_end",
+    }:
+        proposed_date = parse_date(proposed)
+        return proposed_date is not None and any(
+            parse_date(raw_value) == proposed_date
+            for raw_value in raw_values
+            if isinstance(raw_value, str)
+        )
+
+    if field in {"registration_url", "cover_image"}:
+        return isinstance(proposed, str) and any(
+            isinstance(raw_value, str)
+            and raw_value.strip() == proposed.strip()
+            for raw_value in raw_values
+        )
+
+    normalized = _normalized_evidence(proposed)
+    return bool(normalized) and any(
+        _normalized_evidence(raw_value) == normalized
+        for raw_value in raw_values
+    )
 
 
 def _build_cleaning_updates(
@@ -363,14 +451,9 @@ def _build_cleaning_updates(
             continue
         if field in {"registration_url", "cover_image"} and not _is_http_url(value):
             continue
-        updates[field] = value
-
-    for field in ("track_tags", "tech_tags", "sponsors"):
-        if getattr(event, field, None):
+        if not _has_matching_raw_evidence(event, field, value):
             continue
-        value = _clean_string_list(missing.get(field))
-        if value:
-            updates[field] = value
+        updates[field] = value
 
     for field in (
         "registration_start",
@@ -381,7 +464,11 @@ def _build_cleaning_updates(
         if getattr(event, field, None) is not None:
             continue
         value = parse_date(missing.get(field))
-        if value is not None:
+        if value is not None and _has_matching_raw_evidence(
+            event,
+            field,
+            missing.get(field),
+        ):
             updates[field] = value
 
     for start_field, end_field in (

@@ -135,7 +135,8 @@ open http://localhost:8000/docs
 
 清洗只改善阅读体验：去除导航、广告、推荐文章和重复文本，整理赛事名称、摘要与
 介绍。日期、奖金、规则、主办方、地点和链接等事实字段不得推测或改写；已有事实
-字段不会被模型覆盖，缺失字段也只有在原始抓取数据存在明确依据时才补入。
+字段不会被模型覆盖；缺失事实字段只有与 `raw_data` 中同名或明确对应的结构化
+原值通过服务端校验后才补入，模型返回的标签、日期文本等错误分类不会直接入库。
 
 服务启动时和定时任务都会扫描遗漏的 `PENDING` 赛事，以及已经 `APPROVED` 但
 `is_cleaned=false` 的赛事并重新入队。单进程默认启动 2 个异步 worker，可通过
@@ -154,10 +155,10 @@ LLM_SCREENING_SCAN_INTERVAL_SECONDS=300
 
 ```text
 [Screening] 开始筛选：id=11，名称=Example Hackathon
-[Screening] 模型响应：id=11，名称=Example Hackathon，内容="{\"approved\": true, \"reason\": \"赛事信息有效\", \"confidence\": 0.95}"
+[Screening] 模型响应：id=11，名称=Example Hackathon，模型=step-3.7-flash，stop_reason=end_turn，input_tokens=420，output_tokens=850，content_types=['thinking', 'text']，内容="{\"approved\": true, \"reason\": \"赛事信息有效\", \"confidence\": 0.95}"
 [Screening] 筛选完成：id=11，名称=Example Hackathon，结果=通过
 [Cleaning] 开始清洗：id=11，名称=Example Hackathon
-[Cleaning] 模型响应：id=11，名称=Example Hackathon，内容="{\"name\": \"Example Hackathon\", ...}"
+[Cleaning] 模型响应：id=11，名称=Example Hackathon，模型=step-3.7-flash，stop_reason=end_turn，input_tokens=760，output_tokens=3500，content_types=['thinking', 'text']，内容="{\"name\": \"Example Hackathon\", ...}"
 [Cleaning] 清洗完成：id=11，名称=Example Hackathon，更新字段=description,summary
 ```
 

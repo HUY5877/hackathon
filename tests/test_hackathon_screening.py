@@ -127,6 +127,7 @@ async def test_screening_worker_updates_pending_event(monkeypatch, caplog):
     try:
         async with sessions() as session:
             event = _hackathon("screen-me", HackathonDisplayStatus.PENDING)
+            event.raw_data = {"organizer": "Official Organizer"}
             session.add(event)
             await session.commit()
             event_id = event.id
@@ -306,6 +307,11 @@ def test_cleaning_updates_preserve_existing_facts_and_system_fields():
     event.event_start = datetime(2026, 9, 1)
     event.organizer = "Original Organizer"
     event.source_url = "https://official.example/event"
+    event.raw_data = {
+        "country": "China",
+        "city": "Beijing",
+        "tracks": ["October 01 at 2:45am EDT to deadline"],
+    }
 
     updates = screening_module._build_cleaning_updates(
         event,
@@ -319,7 +325,9 @@ def test_cleaning_updates_preserve_existing_facts_and_system_fields():
                 "event_start": "2030-01-01",
                 "organizer": "Invented Organizer",
                 "country": "China",
+                "city": "Shanghai",
                 "registration_url": "javascript:alert(1)",
+                "track_tags": ["October 01 at 2:45am EDT to deadline"],
             },
         },
     )
@@ -330,7 +338,9 @@ def test_cleaning_updates_preserve_existing_facts_and_system_fields():
     assert updates["country"] == "China"
     assert "event_start" not in updates
     assert "organizer" not in updates
+    assert "city" not in updates
     assert "registration_url" not in updates
+    assert "track_tags" not in updates
     assert "source_url" not in updates
     assert "display_status" not in updates
 
@@ -451,7 +461,10 @@ async def test_screening_client_uses_anthropic_messages_protocol(monkeypatch, ca
 
         def json(self):
             return {
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 20, "output_tokens": 30},
                 "content": [
+                    {"type": "thinking", "thinking": "brief reasoning"},
                     {
                         "type": "text",
                         "text": '{"approved": true, "reason": "valid"}\n',
@@ -486,13 +499,12 @@ async def test_screening_client_uses_anthropic_messages_protocol(monkeypatch, ca
     assert decision is True
     assert captured["url"] == "https://api.stepfun.com/step_plan/v1/messages"
     assert captured["json"]["model"] == "step-explore"
-    assert captured["json"]["max_tokens"] == 1024
+    assert captured["json"]["max_tokens"] == 4096
     assert "thinking" not in captured["json"]
-    assert (
-        '模型响应：id=7，名称=Valid Hackathon，内容="{\\"approved\\": true, '
-        '\\"reason\\": \\"valid\\"}\\n"'
-        in caplog.text
-    )
+    assert "模型=step-explore，stop_reason=end_turn" in caplog.text
+    assert "input_tokens=20，output_tokens=30" in caplog.text
+    assert "content_types=['thinking', 'text']" in caplog.text
+    assert '\\"approved\\": true' in caplog.text
 
 
 @pytest.mark.asyncio
@@ -542,8 +554,11 @@ async def test_cleaning_client_uses_anthropic_messages_protocol(monkeypatch):
     assert result["name"] == "Clean Event"
     assert captured["url"] == "https://api.stepfun.com/step_plan/v1/messages"
     assert captured["json"]["model"] == "step-explore"
-    assert captured["json"]["max_tokens"] == 4096
+    assert captured["json"]["max_tokens"] == 8192
     assert captured["timeout"] == 120
+    prompt = captured["json"]["messages"][0]["content"]
+    assert '"registration_start": null' not in prompt
+    assert '"track_tags"' not in prompt
 
 
 @pytest.mark.asyncio
@@ -582,4 +597,49 @@ async def test_screening_client_reports_token_limit_without_text(monkeypatch, ca
     decision = await client.evaluate({"id": 8, "name": "Long Reasoning"})
 
     assert decision is None
-    assert "模型输出达到 max_tokens=1024，未生成文本结果" in caplog.text
+    assert "模型输出达到 max_tokens=4096，响应可能不完整" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_cleaning_client_rejects_partial_text_at_token_limit(monkeypatch, caplog):
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "stop_reason": "max_tokens",
+                "usage": {"input_tokens": 762, "output_tokens": 8192},
+                "content": [
+                    {"type": "thinking", "thinking": "long reasoning"},
+                    {"type": "text", "text": '{"name":"Half response"'},
+                ],
+            }
+
+    class _AsyncClient:
+        def __init__(self, *, timeout):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def post(self, url, *, headers, json):
+            return _Response()
+
+    monkeypatch.setattr(screening_module.httpx, "AsyncClient", _AsyncClient)
+    client = screening_module.EventCleaningClient(
+        api_key="test-key",
+        base_url="https://api.stepfun.com/step_plan",
+        model="step-3.7-flash",
+    )
+    caplog.set_level("INFO", logger=screening_module.__name__)
+
+    result = await client.clean({"id": 9, "name": "Truncated Event"})
+
+    assert result is None
+    assert "stop_reason=max_tokens" in caplog.text
+    assert "output_tokens=8192" in caplog.text
+    assert "模型输出达到 max_tokens=8192，响应可能不完整" in caplog.text
