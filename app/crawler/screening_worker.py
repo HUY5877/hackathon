@@ -27,11 +27,17 @@ logger = logging.getLogger(__name__)
 
 SCREENING_PROMPT = """你是赛事内容质量审核员。请判断下面的数据是否适合展示在黑客松赛事信息平台。
 
+以下任一情况必须拒绝：
+1. event_start 和 event_end 同时缺失，无法确认赛事举办时间；
+2. 来源是奖项、赛程、规则、评审、FAQ、赞助商等赛事附属页面，而不是赛事主页面；
+3. 标题只是“Prizes at ...”“Schedule ...”“Rules ...”等附属内容标题；
+4. 无法确认这是一个具体、可参加的赛事，或没有可信的活动详情入口。
+
 通过标准：
 1. 内容确实是黑客松、编程竞赛、创新挑战赛或 game jam，而不是新闻、课程、招聘或普通会议；
-2. 名称和来源链接可信，不是占位符、列表页、垃圾广告或明显重复拼接内容；
+2. 名称和来源链接可信，指向赛事主页面，不是占位符、列表页、附属页面、垃圾广告或明显重复拼接内容；
 3. 至少有足够的信息让用户理解活动内容，并能找到报名或活动详情；
-4. 字段不完整本身不等于不通过，只在内容明显无效、错误或不可用时拒绝。
+4. 除赛事举办时间外，其他字段不完整本身不等于不通过；赛事举办时间完全缺失时必须拒绝。
 
 赛事数据：
 {event_json}
@@ -68,6 +74,24 @@ location、country、city、organizer、prize_pool、registration_url、cover_im
 
 SCREENING_MAX_TOKENS = 4096
 CLEANING_MAX_TOKENS = 8192
+
+_AUXILIARY_PAGE_SEGMENTS = frozenset(
+    {
+        "prizes",
+        "schedule",
+        "rules",
+        "judging",
+        "criteria",
+        "faq",
+        "resources",
+        "sponsors",
+    }
+)
+_AUXILIARY_TITLE_PREFIXES = (
+    "prizes at ",
+    "schedule for ",
+    "rules for ",
+)
 
 
 class ScreeningResponseError(ValueError):
@@ -300,6 +324,29 @@ def _event_payload(event: Hackathon) -> dict[str, Any]:
         "organizer": event.organizer,
         "raw_data": event.raw_data,
     }
+
+
+def _hard_screening_rejection_reason(event: Hackathon) -> str | None:
+    """Apply deterministic minimum-quality rules before asking the model."""
+    if event.event_start is None and event.event_end is None:
+        return "缺少赛事开始和结束时间"
+
+    parsed_url = urlparse(event.source_url or "")
+    path_segments = {
+        segment.casefold()
+        for segment in parsed_url.path.split("/")
+        if segment.strip()
+    }
+    auxiliary_segments = path_segments & _AUXILIARY_PAGE_SEGMENTS
+    if auxiliary_segments:
+        segment = sorted(auxiliary_segments)[0]
+        return f"来源链接是赛事附属页面（/{segment}）"
+
+    normalized_name = (event.name or "").strip().casefold()
+    if normalized_name.startswith(_AUXILIARY_TITLE_PREFIXES):
+        return "标题是赛事附属内容，不是赛事主页面"
+
+    return None
 
 
 def _cleaning_payload(event: Hackathon) -> dict[str, Any]:
@@ -637,9 +684,19 @@ class HackathonScreeningWorker:
             payload = _event_payload(event)
 
         logger.info("[Screening] 开始筛选：id=%s，名称=%s", event_id, event_name)
-        approved = await self.client.evaluate(payload)
-        if approved is None:
-            return
+        hard_rejection_reason = _hard_screening_rejection_reason(event)
+        if hard_rejection_reason:
+            approved = False
+            logger.info(
+                "[Screening] 硬规则未通过：id=%s，名称=%s，原因=%s",
+                event_id,
+                event_name,
+                hard_rejection_reason,
+            )
+        else:
+            approved = await self.client.evaluate(payload)
+            if approved is None:
+                return
 
         new_status = (
             HackathonDisplayStatus.APPROVED

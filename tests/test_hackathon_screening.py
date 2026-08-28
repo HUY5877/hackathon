@@ -44,6 +44,8 @@ def _hackathon(
     display_status: HackathonDisplayStatus,
     *,
     is_cleaned: bool = False,
+    event_start: datetime | None = datetime(2026, 9, 1),
+    event_end: datetime | None = None,
 ) -> Hackathon:
     return Hackathon(
         name=f"Event {slug}",
@@ -54,6 +56,8 @@ def _hackathon(
         mode=HackathonMode.ONLINE,
         display_status=display_status,
         is_cleaned=is_cleaned,
+        event_start=event_start,
+        event_end=event_end,
     )
 
 
@@ -71,6 +75,12 @@ async def test_public_queries_only_return_approved_and_cleaned_hackathons(monkey
                         is_cleaned=True,
                     ),
                     _hackathon("approved-unclean", HackathonDisplayStatus.APPROVED),
+                    _hackathon(
+                        "approved-cleaned-without-time",
+                        HackathonDisplayStatus.APPROVED,
+                        is_cleaned=True,
+                        event_start=None,
+                    ),
                     _hackathon("rejected", HackathonDisplayStatus.REJECTED),
                 ]
             )
@@ -94,6 +104,12 @@ async def test_public_queries_only_return_approved_and_cleaned_hackathons(monkey
         assert (
             await hackathon_service_module.HackathonService.get_hackathon(
                 "approved-unclean"
+            )
+            is None
+        )
+        assert (
+            await hackathon_service_module.HackathonService.get_hackathon(
+                "approved-cleaned-without-time"
             )
             is None
         )
@@ -164,6 +180,77 @@ async def test_screening_worker_updates_pending_event(monkeypatch, caplog):
             f"筛选完成：id={event_id}，名称=Event screen-me，结果=通过"
             in caplog.text
         )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_screening_rejects_event_without_event_time_before_calling_llm(
+    monkeypatch, caplog
+):
+    engine, sessions = await _sqlite_sessions()
+    try:
+        async with sessions() as session:
+            event = _hackathon(
+                "missing-time",
+                HackathonDisplayStatus.PENDING,
+                event_start=None,
+                event_end=None,
+            )
+            session.add(event)
+            await session.commit()
+            event_id = event.id
+
+        monkeypatch.setattr(screening_module, "async_session_factory", sessions)
+        client = _DecisionClient(True)
+        worker = screening_module.HackathonScreeningWorker(
+            client=client,
+            cleaning_client=_CleaningClient({}),
+        )
+        caplog.set_level("INFO", logger=screening_module.__name__)
+        await worker._screen_event(event_id)
+
+        async with sessions() as session:
+            stored = await session.scalar(
+                select(Hackathon).where(Hackathon.id == event_id)
+            )
+        assert stored.display_status == HackathonDisplayStatus.REJECTED
+        assert stored.is_cleaned is False
+        assert client.events == []
+        assert "原因=缺少赛事开始和结束时间" in caplog.text
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("page_name", ["prizes", "schedule", "rules"])
+async def test_screening_rejects_auxiliary_event_page_before_calling_llm(
+    monkeypatch, page_name
+):
+    engine, sessions = await _sqlite_sessions()
+    try:
+        async with sessions() as session:
+            event = _hackathon(page_name, HackathonDisplayStatus.PENDING)
+            event.source_url = f"https://mlh.io/events/example-event/{page_name}"
+            session.add(event)
+            await session.commit()
+            event_id = event.id
+
+        monkeypatch.setattr(screening_module, "async_session_factory", sessions)
+        client = _DecisionClient(True)
+        worker = screening_module.HackathonScreeningWorker(
+            client=client,
+            cleaning_client=_CleaningClient({}),
+        )
+        await worker._screen_event(event_id)
+
+        async with sessions() as session:
+            stored = await session.scalar(
+                select(Hackathon).where(Hackathon.id == event_id)
+            )
+        assert stored.display_status == HackathonDisplayStatus.REJECTED
+        assert stored.is_cleaned is False
+        assert client.events == []
     finally:
         await engine.dispose()
 
