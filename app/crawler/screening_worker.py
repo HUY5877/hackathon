@@ -99,6 +99,12 @@ class QualityScreeningClient:
                     if isinstance(block, dict) and block.get("type") == "text"
                 )
 
+            logger.info(
+                "[Screening] 模型响应：id=%s，名称=%s，内容=%s",
+                event.get("id"),
+                event.get("name"),
+                json.dumps(content, ensure_ascii=False),
+            )
             parsed = _extract_json_from_text(content)
             if not isinstance(parsed, dict) or "approved" not in parsed:
                 raise ScreeningResponseError("模型响应缺少 approved 字段")

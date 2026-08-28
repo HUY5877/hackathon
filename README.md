@@ -148,6 +148,7 @@ LLM_SCREENING_SCAN_INTERVAL_SECONDS=300
 
 ```text
 [Screening] 开始筛选：id=11，名称=Example Hackathon
+[Screening] 模型响应：id=11，名称=Example Hackathon，内容="{\"approved\": true, \"reason\": \"赛事信息有效\", \"confidence\": 0.95}"
 [Screening] 筛选完成：id=11，名称=Example Hackathon，结果=通过
 ```
 

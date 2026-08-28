@@ -203,7 +203,7 @@ def test_screening_client_uses_injected_model_and_url():
 
 
 @pytest.mark.asyncio
-async def test_screening_client_uses_anthropic_messages_protocol(monkeypatch):
+async def test_screening_client_uses_anthropic_messages_protocol(monkeypatch, caplog):
     captured: dict = {}
 
     class _Response:
@@ -215,7 +215,7 @@ async def test_screening_client_uses_anthropic_messages_protocol(monkeypatch):
                 "content": [
                     {
                         "type": "text",
-                        "text": '{"approved": true, "reason": "valid"}',
+                        "text": '{"approved": true, "reason": "valid"}\n',
                     }
                 ]
             }
@@ -241,10 +241,16 @@ async def test_screening_client_uses_anthropic_messages_protocol(monkeypatch):
         model="step-explore",
     )
 
-    decision = await client.evaluate({"name": "Valid Hackathon"})
+    caplog.set_level("INFO", logger=screening_module.__name__)
+    decision = await client.evaluate({"id": 7, "name": "Valid Hackathon"})
 
     assert decision is True
     assert captured["url"] == "https://api.stepfun.com/step_plan/v1/messages"
     assert captured["json"]["model"] == "step-explore"
     assert captured["json"]["max_tokens"] == 256
     assert "thinking" not in captured["json"]
+    assert (
+        '模型响应：id=7，名称=Valid Hackathon，内容="{\\"approved\\": true, '
+        '\\"reason\\": \\"valid\\"}\\n"'
+        in caplog.text
+    )
