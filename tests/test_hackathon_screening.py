@@ -12,12 +12,23 @@ from app.models.hackathon import (
     HackathonMode,
     HackathonStatus,
 )
+from app.config import Settings
 from app.crawler.llm_processor import StandardizedHackathon
 from app.crawler.persistence import persist_batch
 
 
 screening_module = importlib.import_module("app.crawler.screening_worker")
 hackathon_service_module = importlib.import_module("app.services.hackathon_service")
+
+
+def test_llm_provider_values_are_not_hard_coded_in_settings():
+    isolated_settings = Settings(_env_file=None)
+
+    assert isolated_settings.LLM_API_KEY == ""
+    assert isolated_settings.LLM_API_BASE_URL == ""
+    assert isolated_settings.LLM_MODEL == ""
+    assert isolated_settings.LLM_SCREENING_API_BASE_URL == ""
+    assert isolated_settings.LLM_SCREENING_MODEL == ""
 
 
 async def _sqlite_sessions():
@@ -174,8 +185,12 @@ async def test_persisted_crawl_rows_are_pending_and_returned_for_queueing():
         await engine.dispose()
 
 
-def test_screening_model_defaults_to_step_explore():
-    client = screening_module.QualityScreeningClient(api_key="test-key")
+def test_screening_client_uses_injected_model_and_url():
+    client = screening_module.QualityScreeningClient(
+        api_key="test-key",
+        base_url="https://api.stepfun.com/step_plan",
+        model="step-explore",
+    )
 
     assert client.model == "step-explore"
     assert client.base_url == "https://api.stepfun.com/step_plan"
@@ -214,7 +229,11 @@ async def test_screening_client_uses_anthropic_messages_protocol(monkeypatch):
             return _Response()
 
     monkeypatch.setattr(screening_module.httpx, "AsyncClient", _AsyncClient)
-    client = screening_module.QualityScreeningClient(api_key="test-key")
+    client = screening_module.QualityScreeningClient(
+        api_key="test-key",
+        base_url="https://api.stepfun.com/step_plan",
+        model="step-explore",
+    )
 
     decision = await client.evaluate({"name": "Valid Hackathon"})
 

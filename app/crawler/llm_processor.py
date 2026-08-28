@@ -250,8 +250,8 @@ class LLMProcessor:
         base.sponsors = raw.get("sponsors", []) or []
 
         # 调用 LLM 补充提取
-        if not self.api_key:
-            logger.warning("[LLM] 未配置 API Key，跳过 LLM 清洗")
+        if not all((self.api_key, self.base_url, self.model)):
+            logger.warning("[LLM] API Key、Base URL 或模型未配置，跳过 LLM 清洗")
             return base
 
         try:

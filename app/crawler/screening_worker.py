@@ -44,7 +44,7 @@ class ScreeningResponseError(ValueError):
 
 
 class QualityScreeningClient:
-    """Anthropic Messages-compatible client for the Step Explore model."""
+    """Anthropic Messages-compatible client for the configured screening model."""
 
     def __init__(
         self,
@@ -61,8 +61,10 @@ class QualityScreeningClient:
 
     async def evaluate(self, event: dict[str, Any]) -> bool | None:
         """Return a display decision, or None when the event should be retried."""
-        if not self.api_key:
-            logger.warning("[Screening] 未配置 LLM_API_KEY，赛事保持 pending")
+        if not all((self.api_key, self.base_url, self.model)):
+            logger.warning(
+                "[Screening] API Key、Base URL 或筛选模型未配置，赛事保持 pending"
+            )
             return None
 
         event_json = json.dumps(event, ensure_ascii=False, default=str)
