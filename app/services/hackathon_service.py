@@ -18,6 +18,15 @@ from app.models.hackathon import (
 )
 
 
+def _public_visibility_conditions():
+    """Return the minimum conditions shared by every public event query."""
+    return (
+        Hackathon.display_status == HackathonDisplayStatus.APPROVED,
+        Hackathon.is_cleaned.is_(True),
+        or_(Hackathon.event_start.is_not(None), Hackathon.event_end.is_not(None)),
+    )
+
+
 class HackathonService:
     """信息大厅服务（数据库实现）"""
 
@@ -40,10 +49,7 @@ class HackathonService:
             count_query = select(func.count(Hackathon.id))
 
             # ── 筛选条件 ──
-            conditions = [
-                Hackathon.display_status == HackathonDisplayStatus.APPROVED,
-                Hackathon.is_cleaned.is_(True),
-            ]
+            conditions = list(_public_visibility_conditions())
             if status:
                 conditions.append(Hackathon.status == status.upper())
             if mode:
@@ -102,8 +108,7 @@ class HackathonService:
             result = await session.execute(
                 select(Hackathon).where(
                     Hackathon.slug == slug,
-                    Hackathon.display_status == HackathonDisplayStatus.APPROVED,
-                    Hackathon.is_cleaned.is_(True),
+                    *_public_visibility_conditions(),
                 )
             )
             hackathon = result.scalar_one_or_none()
@@ -119,8 +124,7 @@ class HackathonService:
                 update(Hackathon)
                 .where(
                     Hackathon.id == hackathon_id,
-                    Hackathon.display_status == HackathonDisplayStatus.APPROVED,
-                    Hackathon.is_cleaned.is_(True),
+                    *_public_visibility_conditions(),
                 )
                 .values(external_click_count=Hackathon.external_click_count + 1)
             )
@@ -130,8 +134,7 @@ class HackathonService:
             result = await session.execute(
                 select(Hackathon.external_click_count).where(
                     Hackathon.id == hackathon_id,
-                    Hackathon.display_status == HackathonDisplayStatus.APPROVED,
-                    Hackathon.is_cleaned.is_(True),
+                    *_public_visibility_conditions(),
                 )
             )
             count = result.scalar() or 0
@@ -143,10 +146,7 @@ class HackathonService:
         async with async_session_factory() as session:
             result = await session.execute(
                 select(Hackathon)
-                .where(
-                    Hackathon.display_status == HackathonDisplayStatus.APPROVED,
-                    Hackathon.is_cleaned.is_(True),
-                )
+                .where(*_public_visibility_conditions())
                 .order_by(Hackathon.view_count.desc())
                 .limit(limit)
             )

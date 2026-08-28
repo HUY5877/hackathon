@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from app.crawler.base import CrawlResult
 from app.crawler.task_manager import CrawlerTaskConflict, CrawlerTaskManager
 
 
@@ -151,14 +152,14 @@ class FakeCrawler:
         self.calls.append(self.name)
         if self.release is not None:
             await self.release.wait()
-        return [SimpleNamespace(success=True)]
-
-
-class FakeLLMProcessor:
-    model = "fake"
-
-    async def process_batch(self, raw_results):
-        return []
+        return [
+            CrawlResult(
+                source_platform=self.name,
+                source_url=f"https://example.com/{self.name}",
+                raw_title=f"{self.name} hackathon",
+                raw_data={"mode": "online"},
+            )
+        ]
 
 
 @pytest.mark.asyncio
@@ -173,7 +174,7 @@ async def test_scheduler_platform_progress_and_shared_lock(monkeypatch):
         "CRAWLER_REGISTRY",
         {"test": FakeCrawler("test", calls, release=release)},
     )
-    scheduler = CrawlerScheduler(llm_processor=FakeLLMProcessor())
+    scheduler = CrawlerScheduler()
     progress = []
     first = asyncio.create_task(
         scheduler.run_platform(
@@ -193,7 +194,80 @@ async def test_scheduler_platform_progress_and_shared_lock(monkeypatch):
     result = await first
 
     assert result["status"] == "success"
-    assert [state["progress"] for state in progress] == [15, 55, 95, 100]
+    assert [state["progress"] for state in progress] == [15, 95, 100]
+    assert all(state["phase"] != "cleaning" for state in progress)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_persists_source_data_then_enqueues_llm_work(monkeypatch):
+    from app.crawler.scheduler import CrawlerScheduler
+
+    scheduler_module = importlib.import_module("app.crawler.scheduler")
+    captured = {}
+
+    class SourceCrawler:
+        async def run(self, max_items=None):
+            return [
+                CrawlResult(
+                    source_platform="source",
+                    source_url="https://example.com/event",
+                    raw_title="Source Event",
+                    raw_description="Original description",
+                    raw_data={
+                        "start_date": "2026-09-01",
+                        "end_date": "2026-09-02",
+                        "organizer": "Source Organizer",
+                    },
+                )
+            ]
+
+    async def fake_persist_batch(session, items):
+        captured["items"] = items
+        return SimpleNamespace(
+            event_ids=[42],
+            to_dict=lambda: {
+                "inserted": 1,
+                "updated": 0,
+                "skipped": 0,
+                "errors": [],
+                "total": 1,
+            },
+        )
+
+    class FakeSessionContext:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(scheduler_module, "CRAWLER_REGISTRY", {"source": SourceCrawler()})
+    monkeypatch.setattr(scheduler_module, "persist_batch", fake_persist_batch)
+    monkeypatch.setattr(scheduler_module, "async_session_factory", lambda: FakeSessionContext())
+    monkeypatch.setattr(
+        scheduler_module.screening_worker,
+        "enqueue",
+        lambda event_ids: captured.setdefault("event_ids", list(event_ids)),
+    )
+    progress = []
+
+    result = await CrawlerScheduler().run_platform(
+        "source",
+        save_json=False,
+        persist=True,
+        progress_callback=lambda **state: progress.append(state),
+    )
+
+    assert result["status"] == "success"
+    assert captured["event_ids"] == [42]
+    assert len(captured["items"]) == 1
+    persisted = captured["items"][0]
+    assert persisted.name == "Source Event"
+    assert persisted.description == "Original description"
+    assert persisted.event_start == "2026-09-01"
+    assert persisted.organizer == "Source Organizer"
+    assert persisted.llm_confidence == 0.0
+    assert all(state["phase"] != "cleaning" for state in progress)
 
 
 @pytest.mark.asyncio
@@ -212,7 +286,10 @@ async def test_full_run_visits_every_registered_platform(monkeypatch):
     )
 
     async def fake_persist_batch(session, items):
-        return SimpleNamespace(to_dict=lambda: {"inserted": 0, "updated": 0, "skipped": 0, "errors": []})
+        return SimpleNamespace(
+            event_ids=[],
+            to_dict=lambda: {"inserted": 0, "updated": 0, "skipped": 0, "errors": []},
+        )
 
     async def no_sleep(_seconds):
         return None
@@ -227,7 +304,7 @@ async def test_full_run_visits_every_registered_platform(monkeypatch):
     monkeypatch.setattr(scheduler_module, "persist_batch", fake_persist_batch)
     monkeypatch.setattr(scheduler_module, "async_session_factory", lambda: FakeSessionContext())
     monkeypatch.setattr(scheduler_module.asyncio, "sleep", no_sleep)
-    scheduler = CrawlerScheduler(llm_processor=FakeLLMProcessor())
+    scheduler = CrawlerScheduler()
     progress = []
 
     result = await scheduler.run_all_with_dedup(
@@ -239,3 +316,34 @@ async def test_full_run_visits_every_registered_platform(monkeypatch):
     assert result["summary"]["total_platforms"] == 2
     assert progress[-1]["progress"] == 100
     assert progress[-1]["phase"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_scheduled_platform_run_persists_before_async_screening(monkeypatch):
+    scheduler_manager_module = importlib.import_module("app.crawler.apscheduler_manager")
+    captured = {}
+
+    class CapturingScheduler:
+        async def run_platform(self, platform, **kwargs):
+            captured["platform"] = platform
+            captured["kwargs"] = kwargs
+            return {
+                "platform": platform,
+                "status": "success",
+                "raw_count": 1,
+                "mapped_count": 1,
+            }
+
+    monkeypatch.setattr(
+        scheduler_manager_module,
+        "crawler_scheduler",
+        CapturingScheduler(),
+    )
+
+    result = await scheduler_manager_module.SchedulerManager()._run_platform_safe("mlh")
+
+    assert result["status"] == "success"
+    assert captured == {
+        "platform": "mlh",
+        "kwargs": {"save_json": True, "persist": True},
+    }

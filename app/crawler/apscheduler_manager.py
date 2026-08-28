@@ -126,9 +126,13 @@ class SchedulerManager:
         """安全执行单平台爬取（捕获所有异常，避免任务崩溃）"""
         logger.info(f"[SchedulerManager] 定时任务触发: {platform} @ {datetime.now()}")
         try:
-            result = await crawler_scheduler.run_platform(platform, save_json=True)
+            result = await crawler_scheduler.run_platform(
+                platform,
+                save_json=True,
+                persist=True,
+            )
             logger.info(f"[SchedulerManager] {platform} 完成: {result.get('status')} "
-                        f"(raw={result.get('raw_count', 0)}, cleaned={result.get('cleaned_count', 0)})")
+                        f"(raw={result.get('raw_count', 0)}, mapped={result.get('mapped_count', 0)})")
             return result
         except Exception as e:
             logger.exception(f"[SchedulerManager] {platform} 任务异常: {e}")

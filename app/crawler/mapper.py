@@ -10,10 +10,60 @@ import re
 from datetime import datetime
 from typing import Iterable
 
+from app.crawler.base import CrawlResult
 from app.crawler.llm_processor import StandardizedHackathon
 from app.models.hackathon import Hackathon, HackathonMode, HackathonStatus
 
 logger = logging.getLogger(__name__)
+
+
+def _make_slug(name: str) -> str:
+    """Build the stable slug required by persistence without calling an LLM."""
+    slug = name.lower().replace(" ", "-").replace("/", "-")
+    slug = re.sub(r"[^\w\u4e00-\u9fff\-]", "", slug, flags=re.UNICODE)
+    return slug[:500] or "untitled"
+
+
+def crawl_result_to_standardized(result: CrawlResult) -> StandardizedHackathon:
+    """Map crawler output into the persistence DTO using source data only.
+
+    This function deliberately performs no network or model calls. LLM screening
+    and presentation cleanup start only after the row has been persisted.
+    """
+    raw = dict(result.raw_data or {})
+    name = raw.get("title") or raw.get("name") or result.raw_title or "未命名活动"
+    description = raw.get("description") or result.raw_description
+    image_urls = list(dict.fromkeys(result.image_urls or raw.get("image_urls") or []))
+
+    return StandardizedHackathon(
+        name=name,
+        slug=_make_slug(name),
+        description=description,
+        summary=raw.get("summary"),
+        registration_start=raw.get("signup_start") or raw.get("registration_start"),
+        registration_end=raw.get("signup_end") or raw.get("registration_end"),
+        event_start=raw.get("start_date") or raw.get("event_start"),
+        event_end=raw.get("end_date") or raw.get("event_end"),
+        status=raw.get("status") or "upcoming",
+        mode=raw.get("mode") or "online",
+        track_tags=raw.get("tracks") or raw.get("track_tags") or [],
+        tech_tags=raw.get("tech_tags") or [],
+        prize_pool=raw.get("prize") or raw.get("prize_pool"),
+        prize_pool_usd=raw.get("prize_pool_usd"),
+        location=raw.get("location"),
+        country=raw.get("country"),
+        city=raw.get("city"),
+        source_url=result.source_url,
+        source_platform=result.source_platform,
+        organizer=raw.get("organizer"),
+        sponsors=raw.get("sponsors") or [],
+        requirements=raw.get("requirements") or [],
+        timeline=raw.get("timeline") or [],
+        rules=raw.get("rules"),
+        raw_data=raw,
+        cover_image=raw.get("cover_image"),
+        image_urls=image_urls,
+    )
 
 
 # ── 日期解析 ──────────────────────────────────────────

@@ -1,5 +1,5 @@
 """
-爬虫调度器 — 定时调度所有平台爬虫，驱动 LLM 数据清洗流水线
+爬虫调度器 — 定时抓取、确定性映射、持久化并投递异步筛选任务
 对应架构图中的「自动化爬虫引擎 (D1)」
 
 特性：
@@ -31,7 +31,8 @@ from app.crawler.huodongxing import huodongxing_crawler
 from app.crawler.ethglobal import ethglobal_crawler
 from app.crawler.hackathon_com import hackathon_com_crawler
 from app.crawler.itch_jams import itch_jams_crawler
-from app.crawler.llm_processor import LLMProcessor, StandardizedHackathon
+from app.crawler.llm_processor import StandardizedHackathon
+from app.crawler.mapper import crawl_result_to_standardized
 from app.crawler.persistence import persist_batch, PersistenceResult
 from app.crawler.screening_worker import screening_worker
 from app.db import async_session_factory
@@ -217,8 +218,7 @@ def _merge_into(target: StandardizedHackathon, source: StandardizedHackathon):
 class CrawlerScheduler:
     """爬虫调度器"""
 
-    def __init__(self, llm_processor: LLMProcessor | None = None):
-        self.llm_processor = llm_processor or LLMProcessor()
+    def __init__(self):
         # 运行历史：最近 N 次运行记录
         self._history: list[dict] = []
         self._max_history = 50
@@ -258,7 +258,7 @@ class CrawlerScheduler:
         persist: bool = False,
         progress_callback: ProgressCallback | None = None,
     ) -> dict:
-        """运行单个平台的爬取 + 清洗流水线
+        """运行单个平台的抓取、持久化与异步筛选投递流水线
 
         Args:
             platform: 平台名称
@@ -289,15 +289,8 @@ class CrawlerScheduler:
             max_items = settings.CRAWLER_MAX_ITEMS_PER_PLATFORM or None
             raw_results: list[CrawlResult] = await crawler.run(max_items=max_items)
 
-            # 2. LLM 清洗
-            _report_progress(
-                progress_callback,
-                progress=55,
-                phase="cleaning",
-                message=f"正在清洗 {platform}",
-                current_platform=platform,
-            )
-            standardized: list[StandardizedHackathon] = await self.llm_processor.process_batch(raw_results)
+            # 2. 仅做确定性字段映射。LLM 筛选与清洗由入库后的 worker 异步执行。
+            standardized = [crawl_result_to_standardized(item) for item in raw_results]
 
             # 3. 持久化到数据库（可选）
             persistence_result = None
@@ -338,6 +331,7 @@ class CrawlerScheduler:
                 "raw_count": len(raw_results),
                 "success_count": success_count,
                 "failed_count": len(raw_results) - success_count,
+                "mapped_count": len(standardized),
                 "cleaned_count": len(standardized),
                 "elapsed_seconds": round(elapsed, 1),
                 "schedule": CRAWL_SCHEDULE.get(platform, "按需"),
@@ -376,9 +370,9 @@ class CrawlerScheduler:
         save_json: bool = True,
         progress_callback: ProgressCallback | None = None,
     ) -> dict:
-        """运行所有平台爬取 + 跨平台去重
+        """运行所有平台抓取 + 跨平台去重
 
-        这是推荐的完整流水线：爬取 → 清洗 → 去重 → 保存
+        爬虫任务不调用 LLM：抓取 → 本地映射 → 去重 → 入库 → 投递筛选队列。
         """
         if self._all_lock.locked():
             raise CrawlerBusyError("全量爬虫任务正在运行")
@@ -430,7 +424,6 @@ class CrawlerScheduler:
             await platform_lock.acquire()
             try:
                 slice_start = 5 + int((index / max(total_platforms, 1)) * 80)
-                slice_middle = 5 + int(((index + 0.55) / max(total_platforms, 1)) * 80)
                 _report_progress(
                     progress_callback,
                     progress=slice_start,
@@ -442,16 +435,9 @@ class CrawlerScheduler:
                 )
                 max_items = settings.CRAWLER_MAX_ITEMS_PER_PLATFORM or None
                 raw_results = await crawler.run(max_items=max_items)
-                _report_progress(
-                    progress_callback,
-                    progress=slice_middle,
-                    phase="cleaning",
-                    message=f"正在清洗 {platform}",
-                    current_platform=platform,
-                    completed_platforms=index,
-                    total_platforms=total_platforms,
-                )
-                standardized = await self.llm_processor.process_batch(raw_results)
+                # Crawler tasks must not wait for LLM calls. Persist source data
+                # first, then enqueue the stored rows for asynchronous screening.
+                standardized = [crawl_result_to_standardized(item) for item in raw_results]
                 all_standardized.extend(standardized)
 
                 elapsed = (datetime.now() - platform_start).total_seconds()
@@ -459,6 +445,7 @@ class CrawlerScheduler:
                     "platform": platform,
                     "status": "success",
                     "raw_count": len(raw_results),
+                    "mapped_count": len(standardized),
                     "cleaned_count": len(standardized),
                     "elapsed_seconds": round(elapsed, 1),
                 }
@@ -618,7 +605,7 @@ class CrawlerScheduler:
         return {
             "platforms": list(CRAWLER_REGISTRY.keys()),
             "schedules": CRAWL_SCHEDULE,
-            "llm_model": self.llm_processor.model,
+            "llm_model": settings.LLM_MODEL,
             "status": "running" if CRAWLER_REGISTRY else "idle",
             "stats": self._stats,
             "recent_runs": self._history[-10:],
