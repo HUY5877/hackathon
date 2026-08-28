@@ -41,7 +41,8 @@ class HackathonService:
 
             # ── 筛选条件 ──
             conditions = [
-                Hackathon.display_status == HackathonDisplayStatus.APPROVED
+                Hackathon.display_status == HackathonDisplayStatus.APPROVED,
+                Hackathon.is_cleaned.is_(True),
             ]
             if status:
                 conditions.append(Hackathon.status == status.upper())
@@ -102,6 +103,7 @@ class HackathonService:
                 select(Hackathon).where(
                     Hackathon.slug == slug,
                     Hackathon.display_status == HackathonDisplayStatus.APPROVED,
+                    Hackathon.is_cleaned.is_(True),
                 )
             )
             hackathon = result.scalar_one_or_none()
@@ -118,6 +120,7 @@ class HackathonService:
                 .where(
                     Hackathon.id == hackathon_id,
                     Hackathon.display_status == HackathonDisplayStatus.APPROVED,
+                    Hackathon.is_cleaned.is_(True),
                 )
                 .values(external_click_count=Hackathon.external_click_count + 1)
             )
@@ -128,6 +131,7 @@ class HackathonService:
                 select(Hackathon.external_click_count).where(
                     Hackathon.id == hackathon_id,
                     Hackathon.display_status == HackathonDisplayStatus.APPROVED,
+                    Hackathon.is_cleaned.is_(True),
                 )
             )
             count = result.scalar() or 0
@@ -139,7 +143,10 @@ class HackathonService:
         async with async_session_factory() as session:
             result = await session.execute(
                 select(Hackathon)
-                .where(Hackathon.display_status == HackathonDisplayStatus.APPROVED)
+                .where(
+                    Hackathon.display_status == HackathonDisplayStatus.APPROVED,
+                    Hackathon.is_cleaned.is_(True),
+                )
                 .order_by(Hackathon.view_count.desc())
                 .limit(limit)
             )

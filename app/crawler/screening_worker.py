@@ -1,8 +1,8 @@
 """Asynchronous LLM quality screening for persisted hackathons.
 
-The database PENDING state is the durable source of truth.  The in-process
-queue provides low-latency screening after a crawl, while the periodic scan
-recovers work after process restarts or transient API failures.
+The database status fields are the durable source of truth. The in-process
+queue provides low-latency processing after a crawl, while the periodic scan
+recovers screening and cleaning work after restarts or transient API failures.
 """
 
 import asyncio
@@ -10,12 +10,14 @@ import json
 import logging
 from contextlib import suppress
 from typing import Any, Iterable
+from urllib.parse import urlparse
 
 import httpx
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 
 from app.config import settings
 from app.crawler.llm_processor import _extract_json_from_text
+from app.crawler.mapper import parse_date
 from app.db.session import async_session_factory
 from app.models.hackathon import Hackathon, HackathonDisplayStatus
 
@@ -39,8 +41,50 @@ SCREENING_PROMPT = """你是赛事内容质量审核员。请判断下面的数�
 """
 
 
+CLEANING_PROMPT = """你是赛事内容编辑。请在不改变事实含义的前提下，清洗下面这条已通过质量筛选的赛事数据，让用户更容易阅读。
+
+清洗目标：
+1. 名称去掉网站标题、平台宣传语、重复后缀和无关营销文案，但必须保留赛事官方名称；
+2. 摘要控制在 200 字以内，准确说明赛事主题、参赛对象和核心信息；
+3. 描述删除导航栏、新闻推荐、课程广告、保研考研等无关抓取内容，去重并整理成清晰段落；
+4. 对当前缺失的事实字段，只能在现有字段或 raw_data 中有明确原文依据时补充，否则返回 null；
+5. 不得编造、推测或改写日期、金额、奖项、规则、主办方、地点、链接等事实；不得改变赛事真实含义；
+6. 不得修改 id、slug、source_url、source_platform、raw_data、状态、计数等系统字段。
+
+赛事数据：
+{event_json}
+
+只返回 JSON，字段结构如下：
+{{
+  "name": "清洗后的官方赛事名称",
+  "summary": "清洗后的简洁摘要",
+  "description": "清洗后的赛事介绍，使用纯文本自然分段，不要输出 Markdown 或 HTML",
+  "missing_fields": {{
+    "registration_start": null,
+    "registration_end": null,
+    "event_start": null,
+    "event_end": null,
+    "location": null,
+    "country": null,
+    "city": null,
+    "organizer": null,
+    "prize_pool": null,
+    "registration_url": null,
+    "cover_image": null,
+    "track_tags": null,
+    "tech_tags": null,
+    "sponsors": null
+  }}
+}}
+"""
+
+
 class ScreeningResponseError(ValueError):
     """Raised when the model response does not contain a valid decision."""
+
+
+class CleaningResponseError(ValueError):
+    """Raised when the model response does not contain a cleaning result."""
 
 
 class QualityScreeningClient:
@@ -130,6 +174,92 @@ class QualityScreeningClient:
             return None
 
 
+class EventCleaningClient:
+    """Use the configured Messages-compatible model to improve presentation text."""
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+    ) -> None:
+        self.api_key = settings.LLM_API_KEY if api_key is None else api_key
+        self.base_url = (
+            base_url or settings.LLM_SCREENING_API_BASE_URL
+        ).rstrip("/")
+        self.model = model or settings.LLM_SCREENING_MODEL
+
+    async def clean(self, event: dict[str, Any]) -> dict[str, Any] | None:
+        """Return whitelisted cleaning suggestions, or None for a later retry."""
+        if not all((self.api_key, self.base_url, self.model)):
+            logger.warning(
+                "[Cleaning] 清洗失败：id=%s，名称=%s，稍后重试，原因=API 配置不完整",
+                event.get("id"),
+                event.get("name"),
+            )
+            return None
+
+        event_json = json.dumps(event, ensure_ascii=False, default=str)
+        if len(event_json) > 30_000:
+            event_json = event_json[:30_000] + "...(truncated)"
+
+        try:
+            async with httpx.AsyncClient(timeout=120) as client:
+                response = await client.post(
+                    f"{self.base_url}/v1/messages",
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                    json={
+                        "model": self.model,
+                        "max_tokens": 4096,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": CLEANING_PROMPT.format(event_json=event_json),
+                            }
+                        ],
+                    },
+                )
+                response.raise_for_status()
+                response_payload = response.json()
+                content_blocks = response_payload["content"]
+                if not isinstance(content_blocks, list):
+                    raise CleaningResponseError("模型响应 content 必须是数组")
+                content = "".join(
+                    block.get("text", "")
+                    for block in content_blocks
+                    if isinstance(block, dict) and block.get("type") == "text"
+                )
+                if not content and response_payload.get("stop_reason") == "max_tokens":
+                    raise CleaningResponseError(
+                        "模型输出达到 max_tokens=4096，未生成文本结果"
+                    )
+
+            logger.info(
+                "[Cleaning] 模型响应：id=%s，名称=%s，内容=%s",
+                event.get("id"),
+                event.get("name"),
+                json.dumps(content, ensure_ascii=False),
+            )
+            parsed = _extract_json_from_text(content)
+            if not isinstance(parsed, dict):
+                raise CleaningResponseError("模型响应不是 JSON 对象")
+            if not any(
+                key in parsed
+                for key in ("name", "summary", "description", "missing_fields")
+            ):
+                raise CleaningResponseError("模型响应缺少清洗字段")
+            return parsed
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            logger.warning(
+                "[Cleaning] 清洗失败：id=%s，名称=%s，稍后重试，原因=%s",
+                event.get("id"),
+                event.get("name"),
+                exc,
+            )
+            return None
+
+
 def _event_payload(event: Hackathon) -> dict[str, Any]:
     """Build the bounded, auditable input sent to the screening model."""
     return {
@@ -148,11 +278,135 @@ def _event_payload(event: Hackathon) -> dict[str, Any]:
     }
 
 
-class HackathonScreeningWorker:
-    """Own an asyncio queue and update the three-state display decision."""
+def _cleaning_payload(event: Hackathon) -> dict[str, Any]:
+    """Include presentation fields, missing factual fields and original evidence."""
+    return {
+        "id": event.id,
+        "name": event.name,
+        "summary": event.summary,
+        "description": event.description,
+        "registration_start": event.registration_start,
+        "registration_end": event.registration_end,
+        "event_start": event.event_start,
+        "event_end": event.event_end,
+        "track_tags": event.track_tags,
+        "tech_tags": event.tech_tags,
+        "prize_pool": event.prize_pool,
+        "location": event.location,
+        "country": event.country,
+        "city": event.city,
+        "registration_url": event.registration_url,
+        "organizer": event.organizer,
+        "sponsors": event.sponsors,
+        "cover_image": event.cover_image,
+        "source_url": event.source_url,
+        "source_platform": event.source_platform,
+        "raw_data": event.raw_data,
+    }
 
-    def __init__(self, client: QualityScreeningClient | None = None) -> None:
+
+def _clean_string(value: Any, max_length: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    return cleaned[:max_length].strip()
+
+
+def _clean_string_list(value: Any) -> list[str] | None:
+    if not isinstance(value, list):
+        return None
+    cleaned = []
+    for item in value:
+        normalized = _clean_string(item, 100)
+        if normalized and normalized not in cleaned:
+            cleaned.append(normalized)
+    return cleaned[:20] or None
+
+
+def _is_http_url(value: str) -> bool:
+    parsed = urlparse(value)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+def _build_cleaning_updates(
+    event: Hackathon,
+    result: dict[str, Any],
+) -> dict[str, Any]:
+    """Apply only presentation rewrites and evidence-backed missing facts."""
+    updates: dict[str, Any] = {}
+    prose_limits = {"name": 500, "summary": 500, "description": 20_000}
+    for field, limit in prose_limits.items():
+        value = _clean_string(result.get(field), limit)
+        if value is not None:
+            updates[field] = value
+
+    missing = result.get("missing_fields")
+    if not isinstance(missing, dict):
+        missing = {}
+
+    text_limits = {
+        "location": 300,
+        "country": 100,
+        "city": 100,
+        "organizer": 300,
+        "prize_pool": 200,
+        "registration_url": 1000,
+        "cover_image": 1000,
+    }
+    for field, limit in text_limits.items():
+        if getattr(event, field, None):
+            continue
+        value = _clean_string(missing.get(field), limit)
+        if value is None:
+            continue
+        if field in {"registration_url", "cover_image"} and not _is_http_url(value):
+            continue
+        updates[field] = value
+
+    for field in ("track_tags", "tech_tags", "sponsors"):
+        if getattr(event, field, None):
+            continue
+        value = _clean_string_list(missing.get(field))
+        if value:
+            updates[field] = value
+
+    for field in (
+        "registration_start",
+        "registration_end",
+        "event_start",
+        "event_end",
+    ):
+        if getattr(event, field, None) is not None:
+            continue
+        value = parse_date(missing.get(field))
+        if value is not None:
+            updates[field] = value
+
+    for start_field, end_field in (
+        ("registration_start", "registration_end"),
+        ("event_start", "event_end"),
+    ):
+        start = updates.get(start_field, getattr(event, start_field, None))
+        end = updates.get(end_field, getattr(event, end_field, None))
+        if start is not None and end is not None and start > end:
+            updates.pop(start_field, None)
+            updates.pop(end_field, None)
+
+    return updates
+
+
+class HackathonScreeningWorker:
+    """Own the durable screening-then-cleaning pipeline."""
+
+    def __init__(
+        self,
+        client: QualityScreeningClient | None = None,
+        cleaning_client: EventCleaningClient | None = None,
+    ) -> None:
         self.client = client or QualityScreeningClient()
+        self.cleaning_client = cleaning_client or EventCleaningClient()
         self._queue: asyncio.Queue[int] | None = None
         self._queued_ids: set[int] = set()
         self._tasks: list[asyncio.Task[None]] = []
@@ -188,7 +442,7 @@ class HackathonScreeningWorker:
     def enqueue(self, event_ids: Iterable[int]) -> int:
         """Enqueue unique persisted IDs without blocking the crawler transaction."""
         if self._queue is None or not self.is_running:
-            logger.warning("[Screening] worker 未启动，等待定时补扫 pending 赛事")
+            logger.warning("[Screening] worker 未启动，等待定时补扫待筛选/待清洗赛事")
             return 0
 
         enqueued = 0
@@ -202,32 +456,51 @@ class HackathonScreeningWorker:
         return enqueued
 
     async def scan_pending(self) -> int:
-        """Find durable pending rows and enqueue them for screening."""
+        """Recover rows waiting for either screening or post-screen cleaning."""
         batch_size = max(1, settings.LLM_SCREENING_BATCH_SIZE)
         last_id = 0
-        pending_count = 0
+        screening_count = 0
+        cleaning_count = 0
         enqueued = 0
         async with async_session_factory() as session:
             while True:
                 result = await session.execute(
-                    select(Hackathon.id)
+                    select(Hackathon.id, Hackathon.display_status)
                     .where(
-                        Hackathon.display_status == HackathonDisplayStatus.PENDING,
+                        or_(
+                            Hackathon.display_status == HackathonDisplayStatus.PENDING,
+                            and_(
+                                Hackathon.display_status
+                                == HackathonDisplayStatus.APPROVED,
+                                Hackathon.is_cleaned.is_(False),
+                            ),
+                        ),
                         Hackathon.id > last_id,
                     )
                     .order_by(Hackathon.id.asc())
                     .limit(batch_size)
                 )
-                event_ids = list(result.scalars().all())
-                if not event_ids:
+                rows = list(result.all())
+                if not rows:
                     break
-                pending_count += len(event_ids)
+                event_ids = [row[0] for row in rows]
+                screening_count += sum(
+                    1 for _, status in rows
+                    if status == HackathonDisplayStatus.PENDING
+                )
+                cleaning_count += sum(
+                    1 for _, status in rows
+                    if status == HackathonDisplayStatus.APPROVED
+                )
                 enqueued += self.enqueue(event_ids)
                 last_id = event_ids[-1]
                 if len(event_ids) < batch_size:
                     break
         logger.info(
-            "[Screening] 补扫 pending=%s，新增入队=%s", pending_count, enqueued
+            "[Screening] 补扫待筛选=%s，待清洗=%s，新增入队=%s",
+            screening_count,
+            cleaning_count,
+            enqueued,
         )
         return enqueued
 
@@ -236,7 +509,7 @@ class HackathonScreeningWorker:
         while True:
             event_id = await self._queue.get()
             try:
-                await self._screen_event(event_id)
+                await self._process_event(event_id)
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -245,10 +518,29 @@ class HackathonScreeningWorker:
                 self._queued_ids.discard(event_id)
                 self._queue.task_done()
 
+    async def _process_event(self, event_id: int) -> None:
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(Hackathon.display_status, Hackathon.is_cleaned).where(
+                    Hackathon.id == event_id
+                )
+            )
+            state = result.one_or_none()
+        if state is None:
+            return
+        display_status, is_cleaned = state
+        if display_status == HackathonDisplayStatus.PENDING:
+            await self._screen_event(event_id)
+        elif display_status == HackathonDisplayStatus.APPROVED and not is_cleaned:
+            await self._clean_event(event_id)
+
     async def _screen_event(self, event_id: int) -> None:
         async with async_session_factory() as session:
             result = await session.execute(
-                select(Hackathon).where(Hackathon.id == event_id)
+                select(Hackathon).where(
+                    Hackathon.id == event_id,
+                    Hackathon.display_status == HackathonDisplayStatus.PENDING,
+                )
             )
             event = result.scalar_one_or_none()
             if event is None:
@@ -283,6 +575,60 @@ class HackathonScreeningWorker:
             event_id,
             event_name,
             result_text,
+        )
+        if approved:
+            await self._clean_event(event_id)
+
+    async def _clean_event(self, event_id: int) -> None:
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(Hackathon).where(
+                    Hackathon.id == event_id,
+                    Hackathon.display_status == HackathonDisplayStatus.APPROVED,
+                    Hackathon.is_cleaned.is_(False),
+                )
+            )
+            event = result.scalar_one_or_none()
+            if event is None:
+                return
+            event_name = event.name
+            payload = _cleaning_payload(event)
+
+        logger.info("[Cleaning] 开始清洗：id=%s，名称=%s", event_id, event_name)
+        cleaned = await self.cleaning_client.clean(payload)
+        if cleaned is None:
+            return
+
+        async with async_session_factory() as session:
+            result = await session.execute(
+                select(Hackathon).where(
+                    Hackathon.id == event_id,
+                    Hackathon.display_status == HackathonDisplayStatus.APPROVED,
+                    Hackathon.is_cleaned.is_(False),
+                )
+            )
+            event = result.scalar_one_or_none()
+            if event is None:
+                return
+            updates = _build_cleaning_updates(event, cleaned)
+            updates["is_cleaned"] = True
+            await session.execute(
+                update(Hackathon)
+                .where(
+                    Hackathon.id == event_id,
+                    Hackathon.display_status == HackathonDisplayStatus.APPROVED,
+                    Hackathon.is_cleaned.is_(False),
+                )
+                .values(**updates)
+            )
+            await session.commit()
+
+        changed_fields = sorted(field for field in updates if field != "is_cleaned")
+        logger.info(
+            "[Cleaning] 清洗完成：id=%s，名称=%s，更新字段=%s",
+            event_id,
+            event_name,
+            ",".join(changed_fields) if changed_fields else "无内容变更",
         )
 
 

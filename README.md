@@ -123,17 +123,23 @@ open http://localhost:8000/docs
 | 系统 | `GET /health` | 健康检查 |
 | 系统 | `GET /api/crawler/status` | 爬虫状态 |
 
-## 赛事入库与展示筛选
+## 赛事入库、筛选与清洗
 
 爬虫数据始终先写入 `hackathons` 表，不会因质量筛选失败而丢弃。新入库赛事的
-`display_status` 默认为 `PENDING`，随后加入进程内异步队列，由大模型并发筛选：
+`display_status` 默认为 `PENDING`，`is_cleaned` 默认为 `false`，随后加入进程内
+异步队列，由大模型并发处理：
 
 - `PENDING`：尚未筛选，公开赛事接口不展示。
-- `APPROVED`：筛选通过，公开赛事列表、详情、热度榜和推荐接口可以展示。
+- `APPROVED`：筛选通过，接着进入大模型清洗；只有 `is_cleaned=true` 后才展示。
 - `REJECTED`：筛选未通过，保留在数据库中，但公开接口不展示。
 
-服务启动时和定时任务都会扫描遗漏的 `PENDING` 赛事并重新入队。单进程默认启动
-2 个异步筛选 worker，可通过 `.env` 调整：
+清洗只改善阅读体验：去除导航、广告、推荐文章和重复文本，整理赛事名称、摘要与
+介绍。日期、奖金、规则、主办方、地点和链接等事实字段不得推测或改写；已有事实
+字段不会被模型覆盖，缺失字段也只有在原始抓取数据存在明确依据时才补入。
+
+服务启动时和定时任务都会扫描遗漏的 `PENDING` 赛事，以及已经 `APPROVED` 但
+`is_cleaned=false` 的赛事并重新入队。单进程默认启动 2 个异步 worker，可通过
+`.env` 调整：
 
 ```dotenv
 LLM_API_KEY=
@@ -144,12 +150,15 @@ LLM_SCREENING_BATCH_SIZE=100
 LLM_SCREENING_SCAN_INTERVAL_SECONDS=300
 ```
 
-筛选过程只输出简洁的业务日志：
+处理过程只输出简洁的业务日志：
 
 ```text
 [Screening] 开始筛选：id=11，名称=Example Hackathon
 [Screening] 模型响应：id=11，名称=Example Hackathon，内容="{\"approved\": true, \"reason\": \"赛事信息有效\", \"confidence\": 0.95}"
 [Screening] 筛选完成：id=11，名称=Example Hackathon，结果=通过
+[Cleaning] 开始清洗：id=11，名称=Example Hackathon
+[Cleaning] 模型响应：id=11，名称=Example Hackathon，内容="{\"name\": \"Example Hackathon\", ...}"
+[Cleaning] 清洗完成：id=11，名称=Example Hackathon，更新字段=description,summary
 ```
 
 ## 当前仍在使用的 Mock 数据

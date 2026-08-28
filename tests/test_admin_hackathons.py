@@ -48,6 +48,7 @@ HACKATHON = {
     "is_verified": False,
     "llm_confidence": 0.92,
     "display_status": "approved",
+    "is_cleaned": True,
     "view_count": 12,
     "external_click_count": 3,
     "created_at": datetime(2026, 8, 2, 10, 0),

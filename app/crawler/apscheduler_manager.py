@@ -101,20 +101,20 @@ class SchedulerManager:
         )
         logger.info("[SchedulerManager] 注册全量去重任务: 每日 06:00")
 
-        # 周期补扫数据库中的 pending 赛事。队列仅负责低延迟，数据库状态负责故障恢复。
+        # 周期补扫待筛选、待清洗赛事。队列负责低延迟，数据库状态负责故障恢复。
         self._scheduler.add_job(
             self._scan_pending_screening_safe,
             trigger=IntervalTrigger(
                 seconds=max(1, settings.LLM_SCREENING_SCAN_INTERVAL_SECONDS)
             ),
             id="scan_pending_hackathons",
-            name="补扫未筛选赛事",
+            name="补扫待筛选和待清洗赛事",
             max_instances=1,
             coalesce=True,
             misfire_grace_time=300,
         )
         logger.info(
-            "[SchedulerManager] 注册未筛选赛事补扫任务: 每 %s 秒",
+            "[SchedulerManager] 注册赛事筛选/清洗补扫任务: 每 %s 秒",
             settings.LLM_SCREENING_SCAN_INTERVAL_SECONDS,
         )
 
@@ -146,11 +146,11 @@ class SchedulerManager:
             return {"status": "error", "error": str(e)}
 
     async def _scan_pending_screening_safe(self):
-        """补扫未筛选赛事，失败不影响其他定时任务。"""
+        """补扫待筛选和待清洗赛事，失败不影响其他定时任务。"""
         try:
             return await screening_worker.scan_pending()
         except Exception as e:
-            logger.exception(f"[SchedulerManager] 未筛选赛事补扫异常: {e}")
+            logger.exception(f"[SchedulerManager] 赛事筛选/清洗补扫异常: {e}")
             return 0
 
     def stop(self):

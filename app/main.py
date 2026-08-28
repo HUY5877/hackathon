@@ -55,15 +55,15 @@ async def lifespan(app: FastAPI):
     print(f"📡 API 文档: http://{settings.HOST}:{settings.PORT}/docs")
     print(f"🔧 Debug 模式: {settings.DEBUG}")
 
-    # 先启动异步质量筛选 worker，再启动爬虫和 pending 补扫定时任务。
+    # 先启动异步筛选/清洗 worker，再启动爬虫和状态补扫定时任务。
     try:
         await screening_worker.start()
     except Exception as e:
-        print(f"⚠️ 大模型筛选 worker 启动失败: {e}")
+        print(f"⚠️ 大模型筛选/清洗 worker 启动失败: {e}")
     try:
         await screening_worker.scan_pending()
     except Exception as e:
-        print(f"⚠️ 未筛选赛事首次补扫失败: {e}")
+        print(f"⚠️ 待筛选/待清洗赛事首次补扫失败: {e}")
     try:
         scheduler_manager.start()
         print(f"⏰ 定时爬虫已启动，共 {len(scheduler_manager.get_jobs())} 个任务")

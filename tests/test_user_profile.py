@@ -82,6 +82,7 @@ def _seed_hackathons():
                 source_url="https://x/ai", source_platform="devpost",
                 status=HackathonStatus.ENDED, mode=HackathonMode.ONLINE,
                 display_status=HackathonDisplayStatus.APPROVED,
+                is_cleaned=True,
                 track_tags=["AI"], tech_tags=["Python"], view_count=100,
             ))
             s.add(Hackathon(
@@ -89,6 +90,7 @@ def _seed_hackathons():
                 source_url="https://x/game", source_platform="devpost",
                 status=HackathonStatus.REGISTERING, mode=HackathonMode.ONLINE,
                 display_status=HackathonDisplayStatus.APPROVED,
+                is_cleaned=True,
                 track_tags=["Gaming"], tech_tags=["C++"], view_count=0,
             ))
             await s.commit()

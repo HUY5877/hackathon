@@ -1,6 +1,7 @@
-"""Quality-screening workflow and public visibility tests."""
+"""Quality-screening, cleaning workflow and public visibility tests."""
 
 import importlib
+from datetime import datetime
 
 import pytest
 from sqlalchemy import select
@@ -38,7 +39,12 @@ async def _sqlite_sessions():
     return engine, async_sessionmaker(engine, expire_on_commit=False)
 
 
-def _hackathon(slug: str, display_status: HackathonDisplayStatus) -> Hackathon:
+def _hackathon(
+    slug: str,
+    display_status: HackathonDisplayStatus,
+    *,
+    is_cleaned: bool = False,
+) -> Hackathon:
     return Hackathon(
         name=f"Event {slug}",
         slug=slug,
@@ -47,18 +53,24 @@ def _hackathon(slug: str, display_status: HackathonDisplayStatus) -> Hackathon:
         status=HackathonStatus.UPCOMING,
         mode=HackathonMode.ONLINE,
         display_status=display_status,
+        is_cleaned=is_cleaned,
     )
 
 
 @pytest.mark.asyncio
-async def test_public_queries_only_return_approved_hackathons(monkeypatch):
+async def test_public_queries_only_return_approved_and_cleaned_hackathons(monkeypatch):
     engine, sessions = await _sqlite_sessions()
     try:
         async with sessions() as session:
             session.add_all(
                 [
                     _hackathon("pending", HackathonDisplayStatus.PENDING),
-                    _hackathon("approved", HackathonDisplayStatus.APPROVED),
+                    _hackathon(
+                        "approved-cleaned",
+                        HackathonDisplayStatus.APPROVED,
+                        is_cleaned=True,
+                    ),
+                    _hackathon("approved-unclean", HackathonDisplayStatus.APPROVED),
                     _hackathon("rejected", HackathonDisplayStatus.REJECTED),
                 ]
             )
@@ -69,16 +81,22 @@ async def test_public_queries_only_return_approved_hackathons(monkeypatch):
         hot = await hackathon_service_module.HackathonService.get_hot_list()
 
         assert total == 1
-        assert [item["slug"] for item in items] == ["approved"]
-        assert [item["slug"] for item in hot] == ["approved"]
+        assert [item["slug"] for item in items] == ["approved-cleaned"]
+        assert [item["slug"] for item in hot] == ["approved-cleaned"]
         assert (
             await hackathon_service_module.HackathonService.get_hackathon("pending")
             is None
         )
         approved = await hackathon_service_module.HackathonService.get_hackathon(
-            "approved"
+            "approved-cleaned"
         )
         assert approved is not None
+        assert (
+            await hackathon_service_module.HackathonService.get_hackathon(
+                "approved-unclean"
+            )
+            is None
+        )
     finally:
         await engine.dispose()
 
@@ -93,6 +111,16 @@ class _DecisionClient:
         return self.decision
 
 
+class _CleaningClient:
+    def __init__(self, result: dict | None):
+        self.result = result
+        self.events: list[dict] = []
+
+    async def clean(self, event: dict) -> dict | None:
+        self.events.append(event)
+        return self.result
+
+
 @pytest.mark.asyncio
 async def test_screening_worker_updates_pending_event(monkeypatch, caplog):
     engine, sessions = await _sqlite_sessions()
@@ -105,16 +133,31 @@ async def test_screening_worker_updates_pending_event(monkeypatch, caplog):
 
         monkeypatch.setattr(screening_module, "async_session_factory", sessions)
         client = _DecisionClient(True)
-        worker = screening_module.HackathonScreeningWorker(client=client)
+        cleaning_client = _CleaningClient(
+            {
+                "name": "Clean Event",
+                "summary": "A readable summary.",
+                "description": "A clean event description.",
+                "missing_fields": {"organizer": "Official Organizer"},
+            }
+        )
+        worker = screening_module.HackathonScreeningWorker(
+            client=client,
+            cleaning_client=cleaning_client,
+        )
         caplog.set_level("INFO", logger=screening_module.__name__)
         await worker._screen_event(event_id)
 
         async with sessions() as session:
-            status = await session.scalar(
-                select(Hackathon.display_status).where(Hackathon.id == event_id)
+            stored = await session.scalar(
+                select(Hackathon).where(Hackathon.id == event_id)
             )
-        assert status == HackathonDisplayStatus.APPROVED
+        assert stored.display_status == HackathonDisplayStatus.APPROVED
+        assert stored.is_cleaned is True
+        assert stored.name == "Clean Event"
+        assert stored.organizer == "Official Organizer"
         assert client.events[0]["source_url"].endswith("/screen-me")
+        assert cleaning_client.events[0]["source_url"].endswith("/screen-me")
         assert f"开始筛选：id={event_id}，名称=Event screen-me" in caplog.text
         assert (
             f"筛选完成：id={event_id}，名称=Event screen-me，结果=通过"
@@ -136,7 +179,8 @@ async def test_screening_failure_keeps_event_pending(monkeypatch):
 
         monkeypatch.setattr(screening_module, "async_session_factory", sessions)
         worker = screening_module.HackathonScreeningWorker(
-            client=_DecisionClient(None)
+            client=_DecisionClient(None),
+            cleaning_client=_CleaningClient({}),
         )
         await worker._screen_event(event_id)
 
@@ -147,6 +191,148 @@ async def test_screening_failure_keeps_event_pending(monkeypatch):
         assert status == HackathonDisplayStatus.PENDING
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_rejected_event_is_not_cleaned(monkeypatch):
+    engine, sessions = await _sqlite_sessions()
+    try:
+        async with sessions() as session:
+            event = _hackathon("reject-me", HackathonDisplayStatus.PENDING)
+            session.add(event)
+            await session.commit()
+            event_id = event.id
+
+        monkeypatch.setattr(screening_module, "async_session_factory", sessions)
+        cleaning_client = _CleaningClient({"name": "must not run"})
+        worker = screening_module.HackathonScreeningWorker(
+            client=_DecisionClient(False),
+            cleaning_client=cleaning_client,
+        )
+        await worker._screen_event(event_id)
+
+        async with sessions() as session:
+            stored = await session.scalar(
+                select(Hackathon).where(Hackathon.id == event_id)
+            )
+        assert stored.display_status == HackathonDisplayStatus.REJECTED
+        assert stored.is_cleaned is False
+        assert cleaning_client.events == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_cleaning_failure_keeps_approved_event_waiting(monkeypatch):
+    engine, sessions = await _sqlite_sessions()
+    try:
+        async with sessions() as session:
+            event = _hackathon("clean-later", HackathonDisplayStatus.APPROVED)
+            session.add(event)
+            await session.commit()
+            event_id = event.id
+
+        monkeypatch.setattr(screening_module, "async_session_factory", sessions)
+        worker = screening_module.HackathonScreeningWorker(
+            client=_DecisionClient(True),
+            cleaning_client=_CleaningClient(None),
+        )
+        await worker._clean_event(event_id)
+
+        async with sessions() as session:
+            stored = await session.scalar(
+                select(Hackathon).where(Hackathon.id == event_id)
+            )
+        assert stored.display_status == HackathonDisplayStatus.APPROVED
+        assert stored.is_cleaned is False
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_scan_pending_recovers_screening_and_cleaning_work(monkeypatch):
+    engine, sessions = await _sqlite_sessions()
+    try:
+        async with sessions() as session:
+            session.add_all(
+                [
+                    _hackathon("pending", HackathonDisplayStatus.PENDING),
+                    _hackathon("clean-me", HackathonDisplayStatus.APPROVED),
+                    _hackathon(
+                        "done",
+                        HackathonDisplayStatus.APPROVED,
+                        is_cleaned=True,
+                    ),
+                    _hackathon("rejected", HackathonDisplayStatus.REJECTED),
+                ]
+            )
+            await session.commit()
+
+        monkeypatch.setattr(screening_module, "async_session_factory", sessions)
+        worker = screening_module.HackathonScreeningWorker(
+            client=_DecisionClient(True),
+            cleaning_client=_CleaningClient({}),
+        )
+        queued: list[int] = []
+
+        def capture_enqueue(event_ids):
+            values = list(event_ids)
+            queued.extend(values)
+            return len(values)
+
+        monkeypatch.setattr(worker, "enqueue", capture_enqueue)
+        enqueued = await worker.scan_pending()
+
+        async with sessions() as session:
+            rows = (
+                await session.execute(
+                    select(Hackathon.id, Hackathon.slug).order_by(Hackathon.id)
+                )
+            ).all()
+        slugs_by_id = dict(rows)
+        assert enqueued == 2
+        assert {slugs_by_id[event_id] for event_id in queued} == {
+            "pending",
+            "clean-me",
+        }
+    finally:
+        await engine.dispose()
+
+
+def test_cleaning_updates_preserve_existing_facts_and_system_fields():
+    event = _hackathon("safe-clean", HackathonDisplayStatus.APPROVED)
+    event.name = "Official Event - Site Navigation"
+    event.description = "Official details plus unrelated ads"
+    event.event_start = datetime(2026, 9, 1)
+    event.organizer = "Original Organizer"
+    event.source_url = "https://official.example/event"
+
+    updates = screening_module._build_cleaning_updates(
+        event,
+        {
+            "name": "Official Event",
+            "summary": "Concise and readable.",
+            "description": "Official event details.",
+            "source_url": "https://attacker.example/changed",
+            "display_status": "rejected",
+            "missing_fields": {
+                "event_start": "2030-01-01",
+                "organizer": "Invented Organizer",
+                "country": "China",
+                "registration_url": "javascript:alert(1)",
+            },
+        },
+    )
+
+    assert updates["name"] == "Official Event"
+    assert updates["summary"] == "Concise and readable."
+    assert updates["description"] == "Official event details."
+    assert updates["country"] == "China"
+    assert "event_start" not in updates
+    assert "organizer" not in updates
+    assert "registration_url" not in updates
+    assert "source_url" not in updates
+    assert "display_status" not in updates
 
 
 @pytest.mark.asyncio
@@ -173,26 +359,79 @@ async def test_persisted_crawl_rows_are_pending_and_returned_for_queueing():
             )
 
         async with sessions() as session:
-            statuses = list(
+            states = list(
                 (
-                    await session.scalars(
-                        select(Hackathon.display_status).order_by(Hackathon.id)
+                    await session.execute(
+                        select(Hackathon.display_status, Hackathon.is_cleaned)
+                        .order_by(Hackathon.id)
                     )
                 ).all()
             )
 
         assert result.inserted == 2
         assert len(result.event_ids) == 2
-        assert statuses == [
-            HackathonDisplayStatus.PENDING,
-            HackathonDisplayStatus.PENDING,
+        assert states == [
+            (HackathonDisplayStatus.PENDING, False),
+            (HackathonDisplayStatus.PENDING, False),
         ]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_crawl_update_resets_screening_and_cleaning_state():
+    engine, sessions = await _sqlite_sessions()
+    try:
+        async with sessions() as session:
+            existing = _hackathon(
+                "refresh-me",
+                HackathonDisplayStatus.APPROVED,
+                is_cleaned=True,
+            )
+            session.add(existing)
+            await session.commit()
+            event_id = existing.id
+
+        async with sessions() as session:
+            result = await persist_batch(
+                session,
+                [
+                    StandardizedHackathon(
+                        name="Event refresh-me",
+                        slug="refresh-me",
+                        summary="New source information",
+                        source_url="https://example.com/refresh-me",
+                        source_platform="test",
+                    )
+                ],
+            )
+
+        async with sessions() as session:
+            stored = await session.scalar(
+                select(Hackathon).where(Hackathon.id == event_id)
+            )
+        assert result.updated == 1
+        assert result.event_ids == [event_id]
+        assert stored.summary == "New source information"
+        assert stored.display_status == HackathonDisplayStatus.PENDING
+        assert stored.is_cleaned is False
     finally:
         await engine.dispose()
 
 
 def test_screening_client_uses_injected_model_and_url():
     client = screening_module.QualityScreeningClient(
+        api_key="test-key",
+        base_url="https://api.stepfun.com/step_plan",
+        model="step-explore",
+    )
+
+    assert client.model == "step-explore"
+    assert client.base_url == "https://api.stepfun.com/step_plan"
+
+
+def test_cleaning_client_uses_injected_model_and_url():
+    client = screening_module.EventCleaningClient(
         api_key="test-key",
         base_url="https://api.stepfun.com/step_plan",
         model="step-explore",
@@ -254,6 +493,57 @@ async def test_screening_client_uses_anthropic_messages_protocol(monkeypatch, ca
         '\\"reason\\": \\"valid\\"}\\n"'
         in caplog.text
     )
+
+
+@pytest.mark.asyncio
+async def test_cleaning_client_uses_anthropic_messages_protocol(monkeypatch):
+    captured: dict = {}
+
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            '{"name":"Clean Event","summary":"Readable",'
+                            '"description":"Clean details","missing_fields":{}}'
+                        ),
+                    }
+                ]
+            }
+
+    class _AsyncClient:
+        def __init__(self, *, timeout):
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def post(self, url, *, headers, json):
+            captured.update(url=url, headers=headers, json=json)
+            return _Response()
+
+    monkeypatch.setattr(screening_module.httpx, "AsyncClient", _AsyncClient)
+    client = screening_module.EventCleaningClient(
+        api_key="test-key",
+        base_url="https://api.stepfun.com/step_plan",
+        model="step-explore",
+    )
+
+    result = await client.clean({"id": 9, "name": "Messy Event"})
+
+    assert result["name"] == "Clean Event"
+    assert captured["url"] == "https://api.stepfun.com/step_plan/v1/messages"
+    assert captured["json"]["model"] == "step-explore"
+    assert captured["json"]["max_tokens"] == 4096
+    assert captured["timeout"] == 120
 
 
 @pytest.mark.asyncio

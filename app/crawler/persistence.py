@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.crawler.llm_processor import StandardizedHackathon
 from app.crawler.mapper import to_hackathon_orm, parse_date, normalize_mode, normalize_status, compute_status_from_dates
-from app.models.hackathon import Hackathon, HackathonStatus
+from app.models.hackathon import Hackathon, HackathonDisplayStatus, HackathonStatus
 
 logger = logging.getLogger(__name__)
 
@@ -141,6 +141,11 @@ def _merge_existing(existing: Hackathon, new_orm: Hackathon) -> bool:
     if existing.status == HackathonStatus.UPCOMING and new_orm.status != HackathonStatus.UPCOMING:
         existing.status = new_orm.status
         changed = True
+
+    # 爬虫补充了新内容后必须重新筛选、重新清洗，避免继续展示旧版本文本。
+    if changed:
+        existing.display_status = HackathonDisplayStatus.PENDING
+        existing.is_cleaned = False
 
     return changed
 

@@ -73,6 +73,7 @@ def _admin_hackathon_dict(hackathon: Hackathon) -> dict:
         "is_verified": hackathon.is_verified,
         "llm_confidence": hackathon.llm_confidence,
         "display_status": display_status,
+        "is_cleaned": hackathon.is_cleaned,
         "view_count": hackathon.view_count,
         "external_click_count": hackathon.external_click_count,
         "created_at": hackathon.created_at,

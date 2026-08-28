@@ -26,7 +26,7 @@ class HackathonStatus(str, enum.Enum):
 
 
 class HackathonDisplayStatus(str, enum.Enum):
-    """LLM 质量筛选状态；只有 APPROVED 赛事可在公共接口展示。"""
+    """LLM 质量筛选状态；公开展示还要求赛事已完成清洗。"""
 
     PENDING = "pending"
     APPROVED = "approved"
@@ -98,6 +98,12 @@ class Hackathon(Base):
         server_default="PENDING",
         nullable=False,
         index=True,
+    )
+    is_cleaned: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        server_default="false",
+        nullable=False,
     )
 
     # ── 平台统计 ──────────────────────────────
