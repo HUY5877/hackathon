@@ -28,8 +28,8 @@
   │   └── users.py               # 用户 API（画像 + EDM）
   ├── models/                    # SQLAlchemy ORM 模型
   ├── schemas/                   # Pydantic 请求/响应 Schema
-  ├── services/                  # 业务服务层（全部 Mock 数据）
-  ├── crawler/                   # 爬虫框架（Mock 实现）
+  ├── services/                  # 业务服务层（数据库实现 + 部分内容 Mock）
+  ├── crawler/                   # 真实爬虫、定时调度与 LLM 处理
   ├── db/                        # 数据库引擎
   └── middleware/                 # 认证中间件
 ```
@@ -60,21 +60,19 @@ app/
 │   ├── inspiration.py         # 灵感池请求/响应
 │   └── empowerment.py         # 赋能文章请求/响应
 ├── services/
-│   ├── auth_service.py        # 认证服务（Mock）
-│   ├── hackathon_service.py   # 信息大厅服务（Mock）
+│   ├── auth_service.py        # 认证服务（数据库）
+│   ├── hackathon_service.py   # 信息大厅服务（数据库，仅公开筛选通过赛事）
 │   ├── inspiration_service.py # 灵感池服务（Mock）
-│   ├── recommendation_service.py # 推荐引擎服务（Mock）
+│   ├── recommendation_service.py # 推荐引擎服务（数据库赛事 + 用户画像）
 │   ├── empowerment_service.py # 赋能内容服务（Mock）
-│   ├── edm_service.py         # EDM 邮件服务（Mock）
-│   └── user_service.py        # 用户画像服务（Mock）
+│   ├── edm_service.py         # 订阅状态落库，邮件发送为 Mock
+│   └── user_service.py        # 用户画像服务（数据库）
 ├── crawler/
 │   ├── base.py                # 爬虫基类
-│   ├── devpost.py             # Devpost 爬虫（Mock）
-│   ├── mlh.py                 # MLH 爬虫（Mock）
-│   ├── eventbrite.py          # Eventbrite 爬虫（Mock）
-│   ├── dorahacks.py           # DoraHacks 爬虫（Mock）
-│   ├── llm_processor.py       # LLM 数据清洗节点（Mock）
-│   └── scheduler.py           # 爬虫调度器
+│   ├── devpost.py 等          # 各平台真实爬虫
+│   ├── llm_processor.py       # LLM 数据清洗节点
+│   ├── screening_worker.py    # 赛事质量异步筛选队列
+│   └── apscheduler_manager.py # 爬虫与 pending 补扫定时任务
 ├── db/
 │   ├── session.py             # 数据库引擎 & 会话
 │   └── base.py (via session)  # ORM 基类
@@ -87,6 +85,12 @@ app/
 ```bash
 # 安装依赖
 pip install -r requirements.txt
+
+# 复制并填写数据库、LLM 接口配置
+cp .env.example .env
+
+# 本地直启前应用数据库迁移；Docker 入口会自动执行迁移
+python -m alembic upgrade head
 
 # 启动开发服务器
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
@@ -119,6 +123,46 @@ open http://localhost:8000/docs
 | 系统 | `GET /health` | 健康检查 |
 | 系统 | `GET /api/crawler/status` | 爬虫状态 |
 
+## 赛事入库与展示筛选
+
+爬虫数据始终先写入 `hackathons` 表，不会因质量筛选失败而丢弃。新入库赛事的
+`display_status` 默认为 `PENDING`，随后加入进程内异步队列，由大模型并发筛选：
+
+- `PENDING`：尚未筛选，公开赛事接口不展示。
+- `APPROVED`：筛选通过，公开赛事列表、详情、热度榜和推荐接口可以展示。
+- `REJECTED`：筛选未通过，保留在数据库中，但公开接口不展示。
+
+服务启动时和定时任务都会扫描遗漏的 `PENDING` 赛事并重新入队。单进程默认启动
+2 个异步筛选 worker，可通过 `.env` 调整：
+
+```dotenv
+LLM_API_KEY=
+LLM_SCREENING_API_BASE_URL=
+LLM_SCREENING_MODEL=
+LLM_SCREENING_WORKERS=2
+LLM_SCREENING_BATCH_SIZE=100
+LLM_SCREENING_SCAN_INTERVAL_SECONDS=300
+```
+
+筛选过程只输出简洁的业务日志：
+
+```text
+[Screening] 开始筛选：id=11，名称=Example Hackathon
+[Screening] 筛选完成：id=11，名称=Example Hackathon，结果=通过
+```
+
+## 当前仍在使用的 Mock 数据
+
+| 功能 | 当前行为 | 用户侧表现 |
+|------|----------|------------|
+| 灵感池 | `inspiration_service.py` 内置 5 条 PGC 案例 | 列表和详情展示固定案例；点赞/收藏只修改进程内计数，服务重启后恢复 |
+| 开发者赋能 | `empowerment_service.py` 内置 6 篇文章 | Vibecoding 教程、参赛指南和文章详情展示固定内容 |
+| 用户收藏列表 | `GET /api/v1/users/me/bookmarks` 固定返回空数组 | 页面没有真实收藏数据 |
+| EDM 邮件发送 | 订阅状态真实落库，但没有接邮件服务 | 发送操作只返回 `mock_sent`，不会真实外发邮件 |
+
+以下模块已不是 Mock：用户注册登录、用户画像、赛事列表与详情、热度榜、个性化推荐、
+爬虫抓取、LLM 数据清洗、赛事质量筛选以及后台赛事管理，均使用真实数据库或外部接口。
+
 ## 架构对应关系
 
 本后端代码严格按照 `架构图代码.txt` 实现：
@@ -139,5 +183,5 @@ Layer 4 (数据爬取与 AI 处理层):
 
 ## 当前状态
 
-⚠️ **框架阶段** — 所有 Service 层使用 Mock 数据，爬虫不执行真实网络请求。
-后续开发只需替换 Service 中的 Mock 实现为真实的数据库操作，以及完善爬虫的网络请求逻辑。
+核心赛事链路已经接入真实爬虫、PostgreSQL、定时任务和 LLM 处理。当前待完善部分主要是
+灵感池与开发者赋能内容持久化、用户收藏持久化，以及真实 EDM 邮件发送。
