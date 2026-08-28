@@ -80,7 +80,7 @@ class QualityScreeningClient:
                     headers={"Authorization": f"Bearer {self.api_key}"},
                     json={
                         "model": self.model,
-                        "max_tokens": 256,
+                        "max_tokens": 1024,
                         "messages": [
                             {
                                 "role": "user",
@@ -90,7 +90,8 @@ class QualityScreeningClient:
                     },
                 )
                 response.raise_for_status()
-                content_blocks = response.json()["content"]
+                response_payload = response.json()
+                content_blocks = response_payload["content"]
                 if not isinstance(content_blocks, list):
                     raise ScreeningResponseError("模型响应 content 必须是数组")
                 content = "".join(
@@ -98,6 +99,11 @@ class QualityScreeningClient:
                     for block in content_blocks
                     if isinstance(block, dict) and block.get("type") == "text"
                 )
+
+                if not content and response_payload.get("stop_reason") == "max_tokens":
+                    raise ScreeningResponseError(
+                        "模型输出达到 max_tokens=1024，未生成文本结果"
+                    )
 
             logger.info(
                 "[Screening] 模型响应：id=%s，名称=%s，内容=%s",

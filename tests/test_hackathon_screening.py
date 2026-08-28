@@ -247,10 +247,49 @@ async def test_screening_client_uses_anthropic_messages_protocol(monkeypatch, ca
     assert decision is True
     assert captured["url"] == "https://api.stepfun.com/step_plan/v1/messages"
     assert captured["json"]["model"] == "step-explore"
-    assert captured["json"]["max_tokens"] == 256
+    assert captured["json"]["max_tokens"] == 1024
     assert "thinking" not in captured["json"]
     assert (
         '模型响应：id=7，名称=Valid Hackathon，内容="{\\"approved\\": true, '
         '\\"reason\\": \\"valid\\"}\\n"'
         in caplog.text
     )
+
+
+@pytest.mark.asyncio
+async def test_screening_client_reports_token_limit_without_text(monkeypatch, caplog):
+    class _Response:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {
+                "stop_reason": "max_tokens",
+                "content": [{"type": "thinking", "thinking": "still reasoning"}],
+            }
+
+    class _AsyncClient:
+        def __init__(self, *, timeout):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, traceback):
+            return False
+
+        async def post(self, url, *, headers, json):
+            return _Response()
+
+    monkeypatch.setattr(screening_module.httpx, "AsyncClient", _AsyncClient)
+    client = screening_module.QualityScreeningClient(
+        api_key="test-key",
+        base_url="https://api.stepfun.com/step_plan",
+        model="step-explore",
+    )
+    caplog.set_level("WARNING", logger=screening_module.__name__)
+
+    decision = await client.evaluate({"id": 8, "name": "Long Reasoning"})
+
+    assert decision is None
+    assert "模型输出达到 max_tokens=1024，未生成文本结果" in caplog.text
