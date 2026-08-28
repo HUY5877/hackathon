@@ -63,7 +63,9 @@ class QualityScreeningClient:
         """Return a display decision, or None when the event should be retried."""
         if not all((self.api_key, self.base_url, self.model)):
             logger.warning(
-                "[Screening] API Key、Base URL 或筛选模型未配置，赛事保持 pending"
+                "[Screening] 筛选失败：id=%s，名称=%s，稍后重试，原因=API 配置不完整",
+                event.get("id"),
+                event.get("name"),
             )
             return None
 
@@ -107,7 +109,12 @@ class QualityScreeningClient:
                 return approved.lower() == "true"
             raise ScreeningResponseError("approved 必须是布尔值")
         except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
-            logger.warning("[Screening] LLM 筛选失败，稍后重试: %s", exc)
+            logger.warning(
+                "[Screening] 筛选失败：id=%s，名称=%s，稍后重试，原因=%s",
+                event.get("id"),
+                event.get("name"),
+                exc,
+            )
             return None
 
 
@@ -235,8 +242,10 @@ class HackathonScreeningWorker:
             if event is None:
                 return
             original_status = event.display_status
+            event_name = event.name
             payload = _event_payload(event)
 
+        logger.info("[Screening] 开始筛选：id=%s，名称=%s", event_id, event_name)
         approved = await self.client.evaluate(payload)
         if approved is None:
             return
@@ -256,7 +265,13 @@ class HackathonScreeningWorker:
                 .values(display_status=new_status)
             )
             await session.commit()
-        logger.info("[Screening] 赛事 %s 筛选结果: %s", event_id, new_status.value)
+        result_text = "通过" if approved else "未通过"
+        logger.info(
+            "[Screening] 筛选完成：id=%s，名称=%s，结果=%s",
+            event_id,
+            event_name,
+            result_text,
+        )
 
 
 screening_worker = HackathonScreeningWorker()

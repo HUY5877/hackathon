@@ -5,8 +5,9 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.config import settings
 
-# 异步引擎（生产环境）
-engine = create_async_engine(settings.DATABASE_URL, echo=settings.DEBUG, future=True)
+# SQL 明细会淹没爬虫和筛选任务的业务日志；需要排查 SQL 时临时调整
+# sqlalchemy.engine 的日志级别即可。
+engine = create_async_engine(settings.DATABASE_URL, echo=False, future=True)
 
 # 会话工厂
 async_session_factory = async_sessionmaker(

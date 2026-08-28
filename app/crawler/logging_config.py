@@ -23,6 +23,7 @@ MODULE_LEVELS = {
     "app.crawler.apscheduler_manager": logging.INFO,
     "app.api.v1.crawler": logging.INFO,
     "httpx": logging.WARNING,        # 降低 httpx 噪音
+    "sqlalchemy.engine": logging.WARNING,
     "apscheduler": logging.WARNING,
     "urllib3": logging.WARNING,
 }
@@ -84,6 +85,7 @@ def setup_logging(
     # 抑制第三方库的过多日志
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
 
 
 class _JsonFormatter(logging.Formatter):

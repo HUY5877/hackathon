@@ -94,7 +94,7 @@ class _DecisionClient:
 
 
 @pytest.mark.asyncio
-async def test_screening_worker_updates_pending_event(monkeypatch):
+async def test_screening_worker_updates_pending_event(monkeypatch, caplog):
     engine, sessions = await _sqlite_sessions()
     try:
         async with sessions() as session:
@@ -106,6 +106,7 @@ async def test_screening_worker_updates_pending_event(monkeypatch):
         monkeypatch.setattr(screening_module, "async_session_factory", sessions)
         client = _DecisionClient(True)
         worker = screening_module.HackathonScreeningWorker(client=client)
+        caplog.set_level("INFO", logger=screening_module.__name__)
         await worker._screen_event(event_id)
 
         async with sessions() as session:
@@ -114,6 +115,11 @@ async def test_screening_worker_updates_pending_event(monkeypatch):
             )
         assert status == HackathonDisplayStatus.APPROVED
         assert client.events[0]["source_url"].endswith("/screen-me")
+        assert f"开始筛选：id={event_id}，名称=Event screen-me" in caplog.text
+        assert (
+            f"筛选完成：id={event_id}，名称=Event screen-me，结果=通过"
+            in caplog.text
+        )
     finally:
         await engine.dispose()
 
