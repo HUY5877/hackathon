@@ -89,7 +89,7 @@ pip install -r requirements.txt
 # 复制并填写数据库、LLM 接口配置
 cp .env.example .env
 
-# 本地直启前应用数据库迁移；Docker 入口会自动执行迁移
+# 本地直启前应用已提交的数据库迁移；Docker 入口也只执行这一步
 python -m alembic upgrade head
 
 # 启动开发服务器
@@ -98,6 +98,24 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 # 访问 API 文档
 open http://localhost:8000/docs
 ```
+
+### 数据库迁移流程
+
+数据库模型发生变化后，只在开发机生成迁移文件：
+
+```bash
+python scripts/new_migration.py "add_event_category"
+```
+
+该脚本会先把本地数据库升级到当前 `head`，再执行 `--autogenerate`，最后在本地应用新迁移。生成后必须检查 `alembic/versions/` 中新文件的 `upgrade()`、`downgrade()` 和 `down_revision`，确认无误后与业务代码一起提交。
+
+生产服务器不会生成或修改迁移文件。容器启动时只执行已经提交到 Git 并打包进镜像的：
+
+```bash
+python -m alembic upgrade head
+```
+
+不要在服务器执行 `alembic revision`，也不要把生产环境的 `alembic/versions/` 配置成可写持久化目录。
 
 ## API 概览
 
