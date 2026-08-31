@@ -14,8 +14,10 @@ def test_migrations_have_one_linear_head() -> None:
 
     assert script.get_heads() == ["20260828_cleaning_status"]
     assert script.get_revision("20260827_display_status").down_revision == (
-        "73bef1ff85a5"
+        "ea71ab474944"
     )
+    assert script.get_revision("ea71ab474944").down_revision == "985154533421"
+    assert script.get_revision("018f4a7dd030").down_revision is None
 
 
 def test_production_entrypoint_does_not_generate_migrations() -> None:
