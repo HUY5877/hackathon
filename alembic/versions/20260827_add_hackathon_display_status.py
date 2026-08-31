@@ -1,7 +1,7 @@
 """add LLM display screening status to hackathons
 
 Revision ID: 20260827_display_status
-Revises:
+Revises: 73bef1ff85a5
 Create Date: 2026-08-27
 """
 
@@ -13,7 +13,7 @@ from sqlalchemy.dialects import postgresql
 
 
 revision: str = "20260827_display_status"
-down_revision: str | None = None
+down_revision: str | None = "73bef1ff85a5"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
