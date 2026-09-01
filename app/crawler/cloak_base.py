@@ -8,7 +8,6 @@
 
 import asyncio
 import logging
-import threading
 
 from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError
 
@@ -23,10 +22,20 @@ class CloakBrowserBaseCrawler(BaseCrawler):
     """
 
     def __init__(self, **kwargs):
+        # 浏览器页签可安全并发，默认给 3 路并发（可被显式参数覆盖）
+        kwargs.setdefault("max_concurrency", 3)
         super().__init__(**kwargs)
         self._browser = None
-        self._browser_lock = threading.Lock()
+        # 惰性创建 asyncio.Lock：避免在模块导入期绑定事件循环，
+        # 且 threading.Lock 跨 await 会阻塞甚至死锁事件循环。
+        self._browser_lock: asyncio.Lock | None = None
         self._cloak_available: bool | None = None
+
+    def _get_lock(self) -> asyncio.Lock:
+        """获取浏览器实例锁（首次使用时在当前事件循环中创建）"""
+        if self._browser_lock is None:
+            self._browser_lock = asyncio.Lock()
+        return self._browser_lock
 
     def _check_cloak_available(self) -> bool:
         """检测 CloakBrowser 是否可用（惰性检测）"""
@@ -43,10 +52,10 @@ class CloakBrowserBaseCrawler(BaseCrawler):
         return self._cloak_available
 
     async def _get_browser(self):
-        """获取复用的 CloakBrowser 实例（线程安全）"""
+        """获取复用的 CloakBrowser 实例（协程安全）"""
         if not self._check_cloak_available():
             return None
-        with self._browser_lock:
+        async with self._get_lock():
             if self._browser is None:
                 try:
                     import cloakbrowser
@@ -89,7 +98,7 @@ class CloakBrowserBaseCrawler(BaseCrawler):
 
     async def close(self):
         """关闭浏览器实例"""
-        with self._browser_lock:
+        async with self._get_lock():
             if self._browser:
                 try:
                     await self._browser.close()

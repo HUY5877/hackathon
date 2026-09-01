@@ -21,6 +21,7 @@ import re
 from datetime import datetime
 
 from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError, extract_images_from_html
+from app.crawler.extraction import extract_explicit_date_range
 
 logger = logging.getLogger(__name__)
 
@@ -29,12 +30,14 @@ class ItchJamsCrawler(BaseCrawler):
     platform_name = "itch_jams"
     base_url = "https://itch.io"
     jams_url = "https://itch.io/jams"
+    # 列表分页上限（页面无新链接时提前停止）
+    MAX_PAGES = 10
 
     async def fetch_list(self) -> list[str]:
-        """抓取 itch.io Jams 列表页（支持分页）"""
+        """抓取 itch.io Jams 列表页（分页直到无新链接，最多 MAX_PAGES 页）"""
         urls: list[str] = []
         # itch.io 通过 page 参数分页
-        for page in range(1, 4):
+        for page in range(1, self.MAX_PAGES + 1):
             try:
                 params = {"page": page} if page > 1 else None
                 resp = await self._safe_get(self.jams_url, params=params)
@@ -80,6 +83,15 @@ class ItchJamsCrawler(BaseCrawler):
         try:
             resp = await self._safe_get(url)
             raw_data = self._parse_detail_html(resp.text, url)
+            if not raw_data.get("title"):
+                return CrawlResult(
+                    source_platform=self.platform_name,
+                    source_url=url,
+                    raw_title="",
+                    raw_data=raw_data,
+                    success=False,
+                    error_message="missing_required_title",
+                )
             return CrawlResult(
                 source_platform=self.platform_name,
                 source_url=url,
@@ -122,24 +134,17 @@ class ItchJamsCrawler(BaseCrawler):
             if title_text and title_text.lower() != "itch.io":
                 data["title"] = title_text
 
-        # 如果标题没找到，从 URL slug 推断
-        if not data.get("title"):
-            slug = url.rstrip("/").split("/")[-1]
-            data["title"] = slug.replace("-", " ").replace("_", " ").title()
-
         # 日期范围：itch.io 使用 .date_range 元素，格式为
         # "Submissions open from 2026-07-22 17:00:00 to 2026-07-26 17:00:00"
         date_range_el = soup.select_one(".date_range")
         if date_range_el:
             date_text = date_range_el.get_text(" ", strip=True)
             data["date_range_raw"] = date_text
-            # 提取 ISO 日期
-            iso_dates = re.findall(r"\d{4}-\d{2}-\d{2}(?:\s+\d{2}:\d{2}:\d{2})?", date_text)
-            if len(iso_dates) >= 2:
-                data["start_date"] = iso_dates[0]
-                data["end_date"] = iso_dates[1]
-            elif len(iso_dates) == 1:
-                data["start_date"] = iso_dates[0]
+            start, end = extract_explicit_date_range(date_text)
+            if start:
+                data["start_date"] = start
+            if end:
+                data["end_date"] = end
 
         # 描述：jam_content 或 .jam_content
         desc_el = (

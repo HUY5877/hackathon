@@ -21,30 +21,39 @@ class TianchiCrawler(BaseCrawler):
         "https://tianchi.aliyun.com/api/notice/competitionList",
     ]
     DETAIL_API = "https://tianchi.aliyun.com/api/competition/detail"
+    PAGE_SIZE = 20
+    MAX_PAGES = 5  # 列表分页上限（短页或空页提前停止）
 
     async def fetch_list(self) -> list[str]:
-        """通过天池 API 获取竞赛列表，多端点回退"""
-        urls: list[str] = []
+        """通过天池 API 分页获取竞赛列表，多端点回退"""
         for api_url in self.LIST_API_CANDIDATES:
-            try:
-                resp = await self._safe_get(
-                    api_url,
-                    params={"page": 1, "pageSize": 20, "status": "all"},
-                )
-                data = self._safe_parse_json(resp.text)
-                items = self._extract_items(data)
-                if items:
-                    for item in items:
-                        comp_id = item.get("competitionId") or item.get("id", "")
-                        if comp_id:
-                            urls.append(
-                                f"https://tianchi.aliyun.com/competition/entrance/{comp_id}/introduction"
-                            )
-                    logger.info(f"[{self.platform_name}] {api_url} 获取 {len(urls)} 条")
-                    return urls
-            except CrawlerError as e:
-                logger.warning(f"[{self.platform_name}] API {api_url} 失败: {e}")
-                continue
+            urls: list[str] = []
+            for page in range(1, self.MAX_PAGES + 1):
+                try:
+                    resp = await self._safe_get(
+                        api_url,
+                        params={"page": page, "pageSize": self.PAGE_SIZE, "status": "all"},
+                    )
+                    items = self._extract_items(self._safe_parse_json(resp.text))
+                except CrawlerError as e:
+                    logger.warning(f"[{self.platform_name}] API {api_url} 第 {page} 页失败: {e}")
+                    break
+                if not items:
+                    break  # 该端点没有更多数据
+                for item in items:
+                    comp_id = item.get("competitionId") or item.get("id", "")
+                    if comp_id:
+                        url = (
+                            "https://tianchi.aliyun.com/competition"
+                            f"/entrance/{comp_id}/introduction"
+                        )
+                        if url not in urls:
+                            urls.append(url)
+                if len(items) < self.PAGE_SIZE:
+                    break  # 短页 = 最后一页
+            if urls:
+                logger.info(f"[{self.platform_name}] {api_url} 获取 {len(urls)} 条")
+                return urls
 
         # 全部 API 失败时回退到 HTML 列表页
         logger.info(f"[{self.platform_name}] API 全部失败，回退到 HTML 抓取")
@@ -110,7 +119,7 @@ class TianchiCrawler(BaseCrawler):
                     "end_date": detail.get("endTime", ""),
                     "prize": detail.get("prize", ""),
                     "organizer": detail.get("organizer", ""),
-                    "mode": detail.get("mode", "online"),
+                    "mode": detail.get("mode", ""),
                     "status": detail.get("status", ""),
                     "participants_count": detail.get("participantCount", 0),
                 }
@@ -162,13 +171,17 @@ class TianchiCrawler(BaseCrawler):
         return raw_data
 
     def _build_result(self, url: str, raw_data: dict) -> CrawlResult:
+        title = raw_data.get("title", "")
+        success = isinstance(title, str) and bool(title.strip())
         return CrawlResult(
             source_platform=self.platform_name,
             source_url=url,
-            raw_title=raw_data.get("title", ""),
+            raw_title=title,
             raw_description=(raw_data.get("description", "") or "")[:500],
             raw_data=raw_data,
             image_urls=raw_data.get("image_urls", []),
+            success=success,
+            error_message=None if success else (raw_data.get("error") or "missing_required_title"),
         )
 
 

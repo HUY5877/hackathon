@@ -3,6 +3,7 @@
 import asyncio
 import importlib
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -268,6 +269,46 @@ async def test_scheduler_persists_source_data_then_enqueues_llm_work(monkeypatch
     assert persisted.organizer == "Source Organizer"
     assert persisted.llm_confidence == 0.0
     assert all(state["phase"] != "cleaning" for state in progress)
+
+
+@pytest.mark.asyncio
+async def test_scheduler_rejects_failed_and_incomplete_results_before_persistence(monkeypatch):
+    from app.crawler.scheduler import CrawlerScheduler
+
+    scheduler_module = importlib.import_module("app.crawler.scheduler")
+
+    class InvalidCrawler:
+        async def run(self, max_items=None):
+            return [
+                CrawlResult(
+                    source_platform="source",
+                    source_url="https://example.com/failed",
+                    raw_title="",
+                    success=False,
+                    error_message="blocked",
+                ),
+                CrawlResult(
+                    source_platform="source",
+                    source_url="https://example.com/missing-title",
+                    raw_title="",
+                ),
+            ]
+
+    persist_mock = AsyncMock()
+    monkeypatch.setattr(scheduler_module, "CRAWLER_REGISTRY", {"source": InvalidCrawler()})
+    monkeypatch.setattr(scheduler_module, "persist_batch", persist_mock)
+    monkeypatch.setattr(CrawlerScheduler, "_alert_failure", AsyncMock())
+
+    result = await CrawlerScheduler().run_platform(
+        "source", save_json=False, persist=True
+    )
+
+    assert result["status"] == "error"
+    assert result["raw_count"] == 2
+    assert result["failed_count"] == 1
+    assert result["invalid_count"] == 1
+    assert result["mapped_count"] == 0
+    persist_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

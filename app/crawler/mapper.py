@@ -102,7 +102,18 @@ def parse_date(value: str | None) -> datetime | None:
         except ValueError:
             continue
 
-    # 尝试从混合文本中提取 YYYY-MM-DD
+    # 混合文本只允许包含一个明确日期。出现多个不同日期时无法判断该字段
+    # 的语义归属，拒绝按位置取第一个。
+    mixed_matches = re.findall(
+        r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})",
+        text,
+    )
+    unique_matches = list(dict.fromkeys(mixed_matches))
+    if len(unique_matches) > 1:
+        logger.warning("[mapper] 拒绝包含多个日期的歧义字段: %r", value)
+        return None
+
+    # 尝试从带标签的短文本中提取唯一 YYYY-MM-DD
     match = re.search(r"(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})", text)
     if match:
         y, m, d = match.groups()
@@ -208,6 +219,17 @@ def to_hackathon_orm(
     reg_end = parse_date(item.registration_end)
     evt_start = parse_date(item.event_start)
     evt_end = parse_date(item.event_end)
+
+    # 爬虫不能靠交换位置“修复”倒置时间；无法判断哪个值错误时两端都留空，
+    # 原始证据仍保存在 raw_data 中供后续人工或模型复核。
+    if reg_start is not None and reg_end is not None and reg_start > reg_end:
+        logger.warning("[mapper] 拒绝倒置报名时间: %s > %s", reg_start, reg_end)
+        reg_start = None
+        reg_end = None
+    if evt_start is not None and evt_end is not None and evt_start > evt_end:
+        logger.warning("[mapper] 拒绝倒置赛事时间: %s > %s", evt_start, evt_end)
+        evt_start = None
+        evt_end = None
 
     # 状态：优先用原始值，无法映射时按日期推断
     status = normalize_status(item.status)

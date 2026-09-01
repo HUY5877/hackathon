@@ -10,6 +10,11 @@ import logging
 import re
 
 from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError, extract_images_from_html
+from app.crawler.extraction import (
+    compact_text_fragments,
+    extract_event_json_ld,
+    extract_explicit_date_range,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +78,12 @@ class MLHCrawler(BaseCrawler):
                         and "/events/" in node["url"]
                     ):
                         event_url = node["url"]
-                        full_url = f"https://mlh.io{event_url}" if event_url.startswith("/") else event_url
+                        event_match = re.search(r"/events/([^/?#]+)", event_url)
+                        if not event_match:
+                            return
+                        # Embedded records may point to /prizes, /schedule, etc.
+                        # Persist only the canonical event page.
+                        full_url = f"https://mlh.io/events/{event_match.group(1)}"
                         if full_url not in urls:
                             urls.append(full_url)
                     for v in node.values():
@@ -125,10 +135,13 @@ class MLHCrawler(BaseCrawler):
         soup = BeautifulSoup(html, "lxml")
 
         data: dict = {"url": url}
+        for key, value in extract_event_json_ld(soup).items():
+            if value:
+                data[key] = value
 
         # 标题
         title_el = soup.select_one("h1") or soup.select_one(".event-name")
-        if title_el:
+        if title_el and not data.get("title"):
             data["title"] = title_el.get_text(strip=True)
 
         # 描述
@@ -142,7 +155,7 @@ class MLHCrawler(BaseCrawler):
 
         # 时间（MLH 通常用 .event-date 或 time 元素）
         date_el = soup.select_one("time") or soup.select_one("[class*='date']")
-        if date_el:
+        if date_el and not data.get("start_date"):
             date_text = date_el.get_text(strip=True)
             data["date_info"] = date_text
             # 尝试解析起止日期（格式如 "Jan 15-17, 2026"）
@@ -157,14 +170,24 @@ class MLHCrawler(BaseCrawler):
         if location_el:
             data["location"] = location_el.get_text(strip=True)
 
-        # 模式
-        body_text = soup.get_text(" ", strip=True).lower()
-        if "online" in body_text and "in-person" in body_text:
-            data["mode"] = "hybrid"
-        elif "online" in body_text or "virtual" in body_text:
-            data["mode"] = "online"
-        elif "in-person" in body_text or "on-site" in body_text:
-            data["mode"] = "offline"
+        # 模式只读取形式/地点等局部节点。
+        if not data.get("mode"):
+            fragments = compact_text_fragments(
+                soup,
+                selectors=("[class*='mode']", "[class*='format']", "[class*='location']", "[class*='venue']"),
+                max_length=120,
+            )
+            evidence = " ".join(
+                text
+                for text in fragments
+                if re.search(r"online|virtual|in[- ]person|on-site|hybrid", text, re.IGNORECASE)
+            ).casefold()
+            if "hybrid" in evidence or ("online" in evidence and "in-person" in evidence):
+                data["mode"] = "hybrid"
+            elif "online" in evidence or "virtual" in evidence:
+                data["mode"] = "online"
+            elif "in-person" in evidence or "in person" in evidence or "on-site" in evidence:
+                data["mode"] = "offline"
 
         # 主办方（MLH 通常是 MLH 或合作高校）
         organizer_el = soup.select_one("[class*='organizer']") or soup.select_one("[class*='host']")
@@ -203,29 +226,11 @@ class MLHCrawler(BaseCrawler):
         - "January 15 - 17, 2026"
         - "2026-01-15 to 2026-01-17"
         """
-        # ISO 格式
-        iso_match = re.findall(r"\d{4}-\d{2}-\d{2}", date_text)
-        if len(iso_match) >= 2:
-            data["start_date"] = iso_match[0]
-            data["end_date"] = iso_match[1]
-            return
-        if len(iso_match) == 1:
-            data["start_date"] = iso_match[0]
-            return
-
-        # 月份名 + 日期范围
-        month_match = re.search(r"([A-Za-z]+)\s+(\d{1,2})\s*[-–]\s*(\d{1,2}),?\s*(\d{4})", date_text)
-        if month_match:
-            month, day1, day2, year = month_match.groups()
-            months = {
-                "jan": "01", "feb": "02", "mar": "03", "apr": "04",
-                "may": "05", "jun": "06", "jul": "07", "aug": "08",
-                "sep": "09", "oct": "10", "nov": "11", "dec": "12",
-            }
-            month_num = months.get(month.lower()[:3])
-            if month_num:
-                data["start_date"] = f"{year}-{month_num}-{int(day1):02d}"
-                data["end_date"] = f"{year}-{month_num}-{int(day2):02d}"
+        start, end = extract_explicit_date_range(date_text)
+        if start:
+            data["start_date"] = start
+        if end:
+            data["end_date"] = end
 
 
 mlh_crawler = MLHCrawler()

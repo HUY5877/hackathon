@@ -15,6 +15,11 @@ import logging
 import re
 
 from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError, extract_images_from_html
+from app.crawler.extraction import (
+    compact_text_fragments,
+    extract_event_json_ld,
+    extract_explicit_date_range,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,13 +110,18 @@ class SaikrCrawler(BaseCrawler):
             data["cover_image"] = cover_image
         data["image_urls"] = image_urls
 
+        # schema.org Event 数据具有明确字段语义，优先级高于页面文案。
+        for key, value in extract_event_json_ld(soup).items():
+            if value and key not in data:
+                data[key] = value
+
         # 标题
         title_el = (
             soup.select_one("h1")
             or soup.select_one("[class*='title']")
             or soup.select_one("title")
         )
-        if title_el:
+        if title_el and not data.get("title"):
             title_text = title_el.get_text(strip=True)
             # 去掉常见的后缀
             for suffix in [" - 赛氪", " - 赛氪竞赛", " - 赛氪网"]:
@@ -125,8 +135,11 @@ class SaikrCrawler(BaseCrawler):
             or soup.select_one("meta[name='description']")
             or soup.select_one("main")
         )
-        if desc_el:
-            text = desc_el.get_text(" ", strip=True)[:2000]
+        if desc_el and not data.get("description"):
+            if desc_el.name == "meta":
+                text = (desc_el.get("content") or "").strip()[:2000]
+            else:
+                text = desc_el.get_text(" ", strip=True)[:2000]
             if text and not data.get("description"):
                 data["description"] = text
         # meta description 作为备选
@@ -137,50 +150,68 @@ class SaikrCrawler(BaseCrawler):
                 if content:
                     data["description"] = content
 
-        # 时间信息
-        full_text = soup.get_text(" ", strip=True)
-        for pattern in [
-            r"(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[日]?)",
-            r"(\d{4}-\d{2}-\d{2})",
-        ]:
-            matches = re.findall(pattern, full_text)
-            if matches:
-                dates = list(dict.fromkeys(matches))[:2]
-                if len(dates) >= 1:
-                    data["start_date"] = dates[0]
-                if len(dates) >= 2:
-                    data["end_date"] = dates[1]
-                break
-
-        # 地点
-        loc_match = re.search(
-            r"(?:地点|举办地|城市|Location)[:\s]*([\u4e00-\u9fa5]+(?:省|市|区|县)?)",
-            full_text,
+        fragments = compact_text_fragments(
+            soup,
+            selectors=(
+                ".info-item",
+                ".detail-item",
+                ".info-row",
+                "li",
+                "p",
+                "tr",
+                "[class*='date']",
+                "[class*='time']",
+            ),
         )
-        if loc_match:
-            data["location"] = loc_match.group(1)
 
-        # 主办方
-        org_match = re.search(
-            r"(?:主办方|主办单位|组织方|Organizer)[:\s]*([\u4e00-\u9fa5a-zA-Z\s,]+?)(?:\n|$)",
-            full_text,
-            re.IGNORECASE,
-        )
-        if org_match:
-            data["organizer"] = org_match.group(1).strip()[:100]
+        # 日期只从带业务标签的局部文本或 JSON-LD 中提取，绝不扫描全页后取前两个。
+        for text in fragments:
+            lower = text.casefold()
+            start, end = extract_explicit_date_range(text)
+            if start is None:
+                continue
+            if any(label in lower for label in ("报名截止", "截止报名", "registration deadline")):
+                data.setdefault("signup_end", end or start)
+            elif any(label in lower for label in ("报名时间", "报名日期", "registration period")):
+                data.setdefault("signup_start", start)
+                if end:
+                    data.setdefault("signup_end", end)
+            elif any(
+                label in lower
+                for label in (
+                    "比赛时间",
+                    "竞赛时间",
+                    "赛事时间",
+                    "活动时间",
+                    "举办时间",
+                    "event date",
+                    "event time",
+                )
+            ):
+                data.setdefault("start_date", start)
+                if end:
+                    data.setdefault("end_date", end)
 
-        # 奖金/奖项
-        prize_match = re.search(
-            r"(?:奖金|奖项|奖品|奖金池| Prize)[:\s]*([^\n]+)", full_text, re.IGNORECASE
-        )
-        if prize_match:
-            data["prize"] = prize_match.group(1).strip()[:100]
-
-        # 模式：线上/线下
-        if "线上" in full_text or "online" in full_text.lower():
-            data["mode"] = "online"
-        elif "线下" in full_text or "in-person" in full_text.lower():
-            data["mode"] = "offline"
+        # 其他事实字段同样只接受带标签的局部片段，避免跨区块吞入导航文本。
+        for text in fragments:
+            if not data.get("location"):
+                match = re.search(r"(?:地点|举办地|城市|Location)\s*[:：]\s*(.+)$", text, re.IGNORECASE)
+                if match:
+                    data["location"] = match.group(1).strip()[:300]
+            if not data.get("organizer"):
+                match = re.search(r"(?:主办方|主办单位|组织方|Organizer)\s*[:：]\s*(.+)$", text, re.IGNORECASE)
+                if match:
+                    data["organizer"] = match.group(1).strip()[:100]
+            if not data.get("prize"):
+                match = re.search(r"(?:奖金池|奖金|奖项|奖品|Prize)\s*[:：]\s*(.+)$", text, re.IGNORECASE)
+                if match:
+                    data["prize"] = match.group(1).strip()[:100]
+            if not data.get("mode") and re.search(r"(?:比赛形式|举办方式|活动形式|Mode)\s*[:：]", text, re.IGNORECASE):
+                lower = text.casefold()
+                if "线上" in lower or "online" in lower:
+                    data["mode"] = "online"
+                elif "线下" in lower or "in-person" in lower or "offline" in lower:
+                    data["mode"] = "offline"
 
         # 标签
         tags: list[str] = []

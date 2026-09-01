@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -62,6 +63,24 @@ class CrawlResult:
     # 标记本次抓取是否成功，便于调度器统计
     success: bool = True
     error_message: str | None = None
+
+
+def crawl_result_validation_error(result: CrawlResult) -> str | None:
+    """Return why a crawl result must not enter mapping/persistence.
+
+    Individual crawlers may fail open or return an empty parse after a source
+    page changes.  The scheduler uses this as a final data-integrity barrier.
+    """
+    if not result.success:
+        return result.error_message or "detail_fetch_failed"
+    if not isinstance(result.raw_title, str) or not result.raw_title.strip():
+        return "missing_required_title"
+    if not isinstance(result.source_platform, str) or not result.source_platform.strip():
+        return "missing_source_platform"
+    parsed_url = urlparse(result.source_url or "")
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        return "invalid_source_url"
+    return None
 
 
 # ── 重试装饰器 ────────────────────────────────────────
@@ -210,6 +229,7 @@ class BaseCrawler(ABC):
         max_retries: int | None = None,
         proxy: str | None = None,
         ua_rotation: bool | None = None,
+        max_concurrency: int | None = None,
     ):
         # 从全局配置读取默认值，便于一处配置全局生效
         from app.config import settings
@@ -217,6 +237,10 @@ class BaseCrawler(ABC):
         self.timeout = timeout if timeout is not None else settings.CRAWLER_TIMEOUT
         self.max_retries = max_retries if max_retries is not None else settings.CRAWLER_MAX_RETRIES
         self.ua_rotation = ua_rotation if ua_rotation is not None else settings.CRAWLER_UA_ROTATION
+        self.max_concurrency = max(
+            1,
+            max_concurrency if max_concurrency is not None else settings.CRAWLER_MAX_CONCURRENCY,
+        )
 
         # 代理池：支持逗号分隔的多个代理，轮询使用
         self._proxy_pool: list[str] = []
@@ -227,6 +251,7 @@ class BaseCrawler(ABC):
         self._proxy_idx = 0
 
         self._client: httpx.AsyncClient | None = None
+        self._client_loop: asyncio.AbstractEventLoop | None = None
 
     @abstractmethod
     async def fetch_list(self) -> list[str]:
@@ -271,25 +296,57 @@ class BaseCrawler(ABC):
             kwargs["proxy"] = effective_proxy
         return httpx.AsyncClient(**kwargs)
 
+    async def _get_client(self) -> httpx.AsyncClient:
+        """获取复用的 HTTP 客户端（连接池在实例生命周期内复用）
+
+        事件循环切换后（如测试里多次 asyncio.run）旧 client 无法跨循环安全关闭，
+        直接弃用并重建，避免 "attached to a different loop" 错误。
+        """
+        loop = asyncio.get_running_loop()
+        if self._client is not None and not self._client.is_closed:
+            if self._client_loop is loop:
+                return self._client
+            try:
+                await self._client.aclose()
+            except Exception:
+                pass  # 旧 client 属于已关闭的事件循环，交给 GC
+        self._client = self._build_client()
+        self._client_loop = loop
+        return self._client
+
     async def close(self):
         """关闭 HTTP 客户端，释放资源"""
         if self._client and not self._client.is_closed:
             await self._client.aclose()
-            self._client = None
+        self._client = None
+        self._client_loop = None
 
     # ── 安全请求封装 ──────────────────────────────────
 
-    async def _safe_get(self, url: str, **kwargs) -> httpx.Response:
-        """带重试 + 异常分类 + UA/代理轮换的 GET 请求"""
+    async def _request_and_check(self, method: str, url: str, **kwargs) -> httpx.Response:
+        """执行 HTTP 请求并做异常分类；无代理池时复用连接池 client"""
+        if self.ua_rotation:
+            # UA 轮换走请求级 header，不影响 client 复用
+            headers = dict(kwargs.pop("headers", None) or {})
+            headers["User-Agent"] = self._current_user_agent()
+            kwargs["headers"] = headers
+
         async def _do_request():
-            # 每次重试都新建 client，便于切换 UA/代理
-            client = self._build_client()
-            try:
-                resp = await client.get(url, **kwargs)
-            except (httpx.TimeoutException, httpx.NetworkError) as e:
-                raise NetworkError(f"网络错误 {url}: {e}") from e
-            finally:
-                await client.aclose()
+            if self._proxy_pool:
+                # 代理是客户端级配置，代理池模式下逐请求新建 client 以轮换代理
+                client = self._build_client()
+                try:
+                    resp = await client.request(method, url, **kwargs)
+                except (httpx.TimeoutException, httpx.NetworkError) as e:
+                    raise NetworkError(f"网络错误 {url}: {e}") from e
+                finally:
+                    await client.aclose()
+            else:
+                client = await self._get_client()
+                try:
+                    resp = await client.request(method, url, **kwargs)
+                except (httpx.TimeoutException, httpx.NetworkError) as e:
+                    raise NetworkError(f"网络错误 {url}: {e}") from e
 
             if resp.status_code == 403:
                 raise BlockedError(f"被反爬拦截 {url} (403)")
@@ -304,31 +361,14 @@ class BaseCrawler(ABC):
             max_retries=self.max_retries,
             retryable_exceptions=(NetworkError, HTTPStatusError, httpx.TimeoutException),
         )
+
+    async def _safe_get(self, url: str, **kwargs) -> httpx.Response:
+        """带重试 + 异常分类 + UA/代理轮换的 GET 请求"""
+        return await self._request_and_check("GET", url, **kwargs)
 
     async def _safe_post(self, url: str, **kwargs) -> httpx.Response:
         """带重试 + 异常分类 + UA/代理轮换的 POST 请求"""
-        async def _do_request():
-            client = self._build_client()
-            try:
-                resp = await client.post(url, **kwargs)
-            except (httpx.TimeoutException, httpx.NetworkError) as e:
-                raise NetworkError(f"网络错误 {url}: {e}") from e
-            finally:
-                await client.aclose()
-
-            if resp.status_code == 403:
-                raise BlockedError(f"被反爬拦截 {url} (403)")
-            if resp.status_code == 429:
-                raise HTTPStatusError(f"频控 429 {url}", 429)
-            if resp.status_code >= 400:
-                raise HTTPStatusError(f"HTTP {resp.status_code} {url}", resp.status_code)
-            return resp
-
-        return await retry_async(
-            _do_request,
-            max_retries=self.max_retries,
-            retryable_exceptions=(NetworkError, HTTPStatusError, httpx.TimeoutException),
-        )
+        return await self._request_and_check("POST", url, **kwargs)
 
     @staticmethod
     def _safe_parse_json(text: str) -> dict:
@@ -350,6 +390,9 @@ class BaseCrawler(ABC):
 
         Args:
             max_items: 限制抓取的详情数量（None 表示不限制，用于测试/限流）
+
+        详情页按 max_concurrency（默认取 CRAWLER_MAX_CONCURRENCY）限并发抓取，
+        结果顺序与列表页 URL 顺序一致。
         """
         logger.info(f"[{self.platform_name}] 开始爬取...")
 
@@ -365,33 +408,44 @@ class BaseCrawler(ABC):
             detail_urls = detail_urls[:max_items]
             logger.info(f"[{self.platform_name}] 限流：仅抓取前 {len(detail_urls)} 条")
 
-        results: list[CrawlResult] = []
-        for url in detail_urls:
-            try:
-                result = await self.fetch_detail(url)
-                results.append(result)
-                await self._delay()
-            except BlockedError as e:
-                logger.error(f"[{self.platform_name}] 被拦截，停止抓取: {url}, {e}")
-                break
-            except CrawlerError as e:
-                logger.error(f"[{self.platform_name}] 抓取失败: {url}, {e}")
-                results.append(CrawlResult(
-                    source_platform=self.platform_name,
-                    source_url=url,
-                    raw_title="",
-                    success=False,
-                    error_message=str(e),
-                ))
-            except Exception as e:
-                logger.exception(f"[{self.platform_name}] 未预期错误: {url}, {e}")
-                results.append(CrawlResult(
-                    source_platform=self.platform_name,
-                    source_url=url,
-                    raw_title="",
-                    success=False,
-                    error_message=f"未预期错误: {e}",
-                ))
+        # 详情抓取按 max_concurrency 限并发；结果槽保序，BlockedError 停止派发新任务
+        slots: list[CrawlResult | None] = [None] * len(detail_urls)
+        semaphore = asyncio.Semaphore(self.max_concurrency)
+        blocked = asyncio.Event()
+
+        async def _fetch_one(index: int, url: str):
+            if blocked.is_set():
+                return
+            async with semaphore:
+                if blocked.is_set():
+                    return
+                try:
+                    slots[index] = await self.fetch_detail(url)
+                    await self._delay()
+                except BlockedError as e:
+                    logger.error(f"[{self.platform_name}] 被拦截，停止抓取: {url}, {e}")
+                    blocked.set()
+                except CrawlerError as e:
+                    logger.error(f"[{self.platform_name}] 抓取失败: {url}, {e}")
+                    slots[index] = CrawlResult(
+                        source_platform=self.platform_name,
+                        source_url=url,
+                        raw_title="",
+                        success=False,
+                        error_message=str(e),
+                    )
+                except Exception as e:
+                    logger.exception(f"[{self.platform_name}] 未预期错误: {url}, {e}")
+                    slots[index] = CrawlResult(
+                        source_platform=self.platform_name,
+                        source_url=url,
+                        raw_title="",
+                        success=False,
+                        error_message=f"未预期错误: {e}",
+                    )
+
+        await asyncio.gather(*(_fetch_one(i, url) for i, url in enumerate(detail_urls)))
+        results: list[CrawlResult] = [r for r in slots if r is not None]
 
         success_count = sum(1 for r in results if r.success)
         logger.info(

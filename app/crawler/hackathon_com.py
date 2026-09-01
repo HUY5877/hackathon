@@ -14,6 +14,12 @@ import logging
 import re
 
 from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError, extract_images_from_html
+from app.crawler.extraction import (
+    compact_text_fragments,
+    extract_event_json_ld,
+    extract_explicit_date_range,
+    is_standalone_date_expression,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -90,9 +96,13 @@ class HackathonComCrawler(BaseCrawler):
             data["cover_image"] = cover_image
         data["image_urls"] = image_urls
 
+        for key, value in extract_event_json_ld(soup).items():
+            if value and key not in data:
+                data[key] = value
+
         # 标题
         title_el = soup.select_one("h1") or soup.select_one("h2")
-        if title_el:
+        if title_el and not data.get("title"):
             data["title"] = title_el.get_text(strip=True)
 
         # meta description
@@ -114,51 +124,87 @@ class HackathonComCrawler(BaseCrawler):
             if not data.get("description"):
                 data["description"] = body_text
 
-        # 结构化字段提取：Hackathon.com 详情页包含
-        # "Organized by X", "In-person only", "Student", 日期等
-        full_text = soup.get_text(" ", strip=True)
+        fragments = compact_text_fragments(
+            soup,
+            selectors=(
+                "time",
+                "[itemprop='startDate']",
+                "[itemprop='endDate']",
+                "[class*='date']",
+                "[class*='time']",
+                "p",
+                "li",
+            ),
+            max_length=240,
+        )
 
-        # 组织者：匹配 "Organized by X." 到句号
-        org_match = re.search(r"Organized by\s+([A-Za-z0-9\s,&.]+?)\.", full_text)
-        if org_match:
-            data["organizer"] = org_match.group(1).strip()[:100]
+        # 属性带有 schema.org 语义时直接按字段读取。
+        for field, selector in (
+            ("start_date", "[itemprop='startDate']"),
+            ("end_date", "[itemprop='endDate']"),
+        ):
+            if data.get(field):
+                continue
+            element = soup.select_one(selector)
+            if element:
+                value = element.get("content") or element.get("datetime") or element.get_text(" ", strip=True)
+                start, _ = extract_explicit_date_range(value)
+                if start:
+                    data[field] = start
 
-        # 形式（In-person / Online）
-        if re.search(r"in[- ]person", full_text, re.IGNORECASE):
-            data["mode"] = "offline"
-        elif re.search(r"\bonline\b", full_text, re.IGNORECASE):
-            data["mode"] = "online"
+        # 未结构化的 HTML 只接受局部明确范围或带 Starts/Ends 标签的值。
+        for text in fragments:
+            start, end = extract_explicit_date_range(text)
+            if start is None:
+                continue
+            lower = text.casefold()
+            if re.search(r"\b(published|publication|updated|last modified)\b", lower):
+                continue
+            if re.search(r"\b(registration|application|deadline)\b", lower):
+                if "deadline" in lower:
+                    data.setdefault("signup_end", end or start)
+                elif end is not None:
+                    data.setdefault("signup_start", start)
+                    data.setdefault("signup_end", end)
+                continue
+            has_event_label = bool(
+                re.search(
+                    r"\b(event|hackathon)\s+(?:date|dates|time)|\b(?:starts?|begins?|ends?)\b",
+                    lower,
+                )
+            )
+            if end is not None and (
+                has_event_label or is_standalone_date_expression(text, start, end)
+            ):
+                data.setdefault("start_date", start)
+                data.setdefault("end_date", end)
+                break
+            if has_event_label and not re.search(r"\bends?\b", lower):
+                data.setdefault("start_date", start)
+            elif re.search(r"\bends?\b", lower):
+                data.setdefault("end_date", start)
 
-        # 受众
-        if re.search(r"\bstudent\b", full_text, re.IGNORECASE):
-            data["audience"] = "student"
-
-        # 日期：查找 "Month DD, YYYY" 或 "DD Month YYYY" 格式
-        date_patterns = [
-            r"((?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s*\d{4})",
-            r"(\d{1,2}\s+(?:January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{4})",
-            r"(\d{4}-\d{2}-\d{2})",
-        ]
-        dates_found: list[str] = []
-        for pattern in date_patterns:
-            for match in re.finditer(pattern, full_text):
-                d = match.group(1)
-                if d not in dates_found:
-                    dates_found.append(d)
-        if dates_found:
-            data["start_date"] = dates_found[0]
-            if len(dates_found) > 1:
-                data["end_date"] = dates_found[1]
-
-        # 地点
-        loc_match = re.search(r"(?:Location|Venue|Place)[:\s]+([A-Za-z\s,]+?)(?=\s{2}|$)", full_text)
-        if loc_match:
-            data["location"] = loc_match.group(1).strip()[:100]
-
-        # 奖金
-        prize_match = re.search(r"(?:Prize|Award|Cash)[:\s]*\$?([\d,]+)", full_text, re.IGNORECASE)
-        if prize_match:
-            data["prize"] = f"${prize_match.group(1)}"
+        for text in fragments:
+            if not data.get("organizer"):
+                match = re.search(r"Organized by\s+(.+?)(?:\.|$)", text, re.IGNORECASE)
+                if match:
+                    data["organizer"] = match.group(1).strip()[:100]
+            if not data.get("location"):
+                match = re.search(r"(?:Location|Venue|Place)\s*[:：]\s*(.+)$", text, re.IGNORECASE)
+                if match:
+                    data["location"] = match.group(1).strip()[:100]
+            if not data.get("prize"):
+                match = re.search(r"(?:Prize|Award|Cash)\s*[:：]\s*(\$?[\d,]+)", text, re.IGNORECASE)
+                if match:
+                    value = match.group(1)
+                    data["prize"] = value if value.startswith("$") else f"${value}"
+            if not data.get("mode"):
+                if re.search(r"\b(in[- ]person only|offline event)\b", text, re.IGNORECASE):
+                    data["mode"] = "offline"
+                elif re.search(r"\b(online only|online event|virtual event)\b", text, re.IGNORECASE):
+                    data["mode"] = "online"
+            if "audience" not in data and re.search(r"\bstudent\b", text, re.IGNORECASE):
+                data["audience"] = "student"
 
         return data
 

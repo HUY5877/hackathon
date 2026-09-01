@@ -14,6 +14,11 @@ import logging
 import re
 
 from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError, extract_images_from_html
+from app.crawler.extraction import (
+    compact_text_fragments,
+    extract_event_json_ld,
+    extract_explicit_date_range,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,9 +102,13 @@ class HuodongxingCrawler(BaseCrawler):
             data["cover_image"] = cover_image
         data["image_urls"] = image_urls
 
+        for key, value in extract_event_json_ld(soup).items():
+            if value and key not in data:
+                data[key] = value
+
         # 标题
         title_el = soup.select_one("h1") or soup.select_one("[class*='title']")
-        if title_el:
+        if title_el and not data.get("title"):
             data["title"] = title_el.get_text(strip=True)
 
         # 描述
@@ -109,8 +118,11 @@ class HuodongxingCrawler(BaseCrawler):
             or soup.select_one("meta[name='description']")
             or soup.select_one("main")
         )
-        if desc_el:
-            text = desc_el.get_text(" ", strip=True)[:2000]
+        if desc_el and not data.get("description"):
+            if desc_el.name == "meta":
+                text = (desc_el.get("content") or "").strip()[:2000]
+            else:
+                text = desc_el.get_text(" ", strip=True)[:2000]
             if text and not data.get("description"):
                 data["description"] = text
         # meta description 作为备选
@@ -122,34 +134,48 @@ class HuodongxingCrawler(BaseCrawler):
                     data["description"] = content
 
         # 活动行详情页常用“标签：值”展示时间、地点和主办方。
-        metadata_fields = {
-            "时间": "start_date",
-            "地点": "location",
-            "主办方": "organizer",
-        }
         for el in soup.select(".info-item, .detail-item, .info-row"):
             text = el.get_text(" ", strip=True)
-            for label, field in metadata_fields.items():
-                match = re.search(rf"{label}\s*[:：]\s*(.+)", text)
-                if match and field not in data:
-                    data[field] = match.group(1).strip()
-                    break
+            time_match = re.search(r"(?:活动时间|举办时间|时间)\s*[:：]\s*(.+)", text)
+            if time_match:
+                start, end = extract_explicit_date_range(time_match.group(1))
+                if start:
+                    data.setdefault("start_date", start)
+                if end:
+                    data.setdefault("end_date", end)
+            location_match = re.search(r"地点\s*[:：]\s*(.+)", text)
+            if location_match:
+                data.setdefault("location", location_match.group(1).strip())
+            organizer_match = re.search(r"主办方\s*[:：]\s*(.+)", text)
+            if organizer_match:
+                data.setdefault("organizer", organizer_match.group(1).strip())
 
-        # 时间
-        for el in soup.select("[class*='date'], [class*='time'], time"):
-            text = el.get_text(strip=True)
-            if text:
-                if "start" in text.lower() or "begin" in text.lower():
-                    data["start_date"] = text
-                elif "end" in text.lower():
-                    data["end_date"] = text
-                elif "deadline" in text.lower():
-                    data["signup_end"] = text
-                else:
-                    # 尝试提取日期格式
-                    date_match = re.search(r"(\d{4}[年/-]\d{1,2}[月/-]\d{1,2}[日]?)", text)
-                    if date_match and not data.get("start_date"):
-                        data["start_date"] = date_match.group(1)
+        # 非结构化时间节点必须带明确标签；generic "date" 可能只是发布日期。
+        for el in soup.select("[itemprop='startDate'], [itemprop='endDate'], [class*='event-date'], [class*='event-time'], [class*='activity-time'], time"):
+            text = el.get("datetime") or el.get("content") or el.get_text(" ", strip=True)
+            start, end = extract_explicit_date_range(text)
+            if start is None:
+                continue
+            semantic = " ".join(el.get("class") or []).casefold()
+            semantic += " " + str(el.get("itemprop") or "").casefold()
+            lower = str(text).casefold()
+            has_event_semantics = any(
+                token in semantic
+                for token in ("event", "activity", "startdate", "enddate")
+            ) or any(
+                token in lower
+                for token in ("活动时间", "举办时间", "开始", "结束", "报名截止")
+            )
+            if not has_event_semantics:
+                continue
+            if "end" in semantic or "end" in lower or "结束" in lower:
+                data.setdefault("end_date", end or start)
+            elif "deadline" in semantic or "deadline" in lower or "报名截止" in lower:
+                data.setdefault("signup_end", end or start)
+            else:
+                data.setdefault("start_date", start)
+                if end:
+                    data.setdefault("end_date", end)
 
         # 地点
         location_el = soup.select_one("[class*='location']") or soup.select_one("[class*='venue']")
@@ -166,11 +192,17 @@ class HuodongxingCrawler(BaseCrawler):
         if price_el:
             data["price"] = price_el.get_text(strip=True)
 
-        # 模式判断
-        body_text = soup.get_text(" ", strip=True).lower()
-        if "线上" in body_text or "online" in body_text:
+        # 模式只使用地点或带“活动形式/举办方式”标签的局部文本。
+        mode_evidence = [str(data.get("location") or "")]
+        mode_evidence.extend(
+            text
+            for text in compact_text_fragments(soup, max_length=120)
+            if re.search(r"(?:活动形式|举办方式|参与方式)\s*[:：]", text)
+        )
+        mode_text = " ".join(mode_evidence).casefold()
+        if "线上" in mode_text or "online" in mode_text:
             data["mode"] = "online"
-        elif "线下" in body_text or "in-person" in body_text:
+        elif "线下" in mode_text or "in-person" in mode_text or "offline" in mode_text:
             data["mode"] = "offline"
 
         # 标签
