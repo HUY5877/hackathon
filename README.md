@@ -143,7 +143,8 @@ python -m alembic upgrade head
 
 ## 赛事入库、筛选与清洗
 
-爬虫数据始终先写入 `hackathons` 表，不会因质量筛选失败而丢弃。新入库赛事的
+只有抓取成功、官方标题非空且来源 URL 有效的记录才写入 `hackathons` 表；抓取失败或
+关键身份字段缺失的记录会在入库前被拒绝。通过该边界的赛事不会因质量筛选失败而丢弃。新入库赛事的
 `display_status` 默认为 `PENDING`，`is_cleaned` 默认为 `false`，随后加入进程内
 异步队列，由大模型并发处理：
 

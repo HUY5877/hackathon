@@ -8,6 +8,7 @@ import re
 
 from app.crawler.base import CrawlResult, extract_images_from_html
 from app.crawler.cloak_base import CloakBrowserBaseCrawler
+from app.crawler.extraction import extract_event_json_ld, extract_explicit_date_range
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +50,13 @@ class DoraHacksCrawler(CloakBrowserBaseCrawler):
         if cover_image:
             data["cover_image"] = cover_image
         data["image_urls"] = image_urls
+        for key, value in extract_event_json_ld(soup).items():
+            if value and key not in data:
+                data[key] = value
 
         # 标题
         title_el = soup.select_one("h1") or soup.select_one("[class*='title']")
-        if title_el:
+        if title_el and not data.get("title"):
             data["title"] = title_el.get_text(strip=True)
 
         # 描述
@@ -69,16 +73,23 @@ class DoraHacksCrawler(CloakBrowserBaseCrawler):
         if prize_el:
             data["prize"] = prize_el.get_text(strip=True)
 
-        # 时间
-        for el in soup.select("[class*='date'], [class*='time'], time"):
-            text = el.get_text(strip=True)
-            if text:
-                if "start" in text.lower() or "begin" in text.lower():
-                    data["start_date"] = text
-                elif "end" in text.lower():
-                    data["end_date"] = text
-                elif "deadline" in text.lower():
-                    data["signup_end"] = text
+        # 时间仅接受带语义节点或明确范围，不按页面顺序推断。
+        for el in soup.select("[itemprop='startDate'], [itemprop='endDate'], [class*='date'], [class*='time'], time"):
+            text = el.get("datetime") or el.get("content") or el.get_text(" ", strip=True)
+            start, end = extract_explicit_date_range(text)
+            if start is None:
+                continue
+            semantic = " ".join(el.get("class") or []).casefold()
+            semantic += " " + str(el.get("itemprop") or "").casefold()
+            lower = str(text).casefold()
+            if "deadline" in semantic or "deadline" in lower:
+                data.setdefault("signup_end", end or start)
+            elif "end" in semantic or "end" in lower:
+                data.setdefault("end_date", end or start)
+            elif "start" in semantic or "start" in lower or "begin" in lower or end is not None:
+                data.setdefault("start_date", start)
+                if end:
+                    data.setdefault("end_date", end)
 
         # 地点
         location_el = soup.select_one("[class*='location']") or soup.select_one("[class*='venue']")

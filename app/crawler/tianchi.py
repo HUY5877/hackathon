@@ -110,7 +110,7 @@ class TianchiCrawler(BaseCrawler):
                     "end_date": detail.get("endTime", ""),
                     "prize": detail.get("prize", ""),
                     "organizer": detail.get("organizer", ""),
-                    "mode": detail.get("mode", "online"),
+                    "mode": detail.get("mode", ""),
                     "status": detail.get("status", ""),
                     "participants_count": detail.get("participantCount", 0),
                 }
@@ -162,13 +162,17 @@ class TianchiCrawler(BaseCrawler):
         return raw_data
 
     def _build_result(self, url: str, raw_data: dict) -> CrawlResult:
+        title = raw_data.get("title", "")
+        success = isinstance(title, str) and bool(title.strip())
         return CrawlResult(
             source_platform=self.platform_name,
             source_url=url,
-            raw_title=raw_data.get("title", ""),
+            raw_title=title,
             raw_description=(raw_data.get("description", "") or "")[:500],
             raw_data=raw_data,
             image_urls=raw_data.get("image_urls", []),
+            success=success,
+            error_message=None if success else (raw_data.get("error") or "missing_required_title"),
         )
 
 

@@ -16,7 +16,12 @@ ETHGlobal 列表页包含每个事件的：
 import logging
 import re
 
-from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError
+from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError, extract_images_from_html
+from app.crawler.extraction import (
+    compact_text_fragments,
+    extract_event_json_ld,
+    extract_explicit_date_range,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -62,16 +67,19 @@ class ETHGlobalCrawler(BaseCrawler):
         return urls
 
     async def fetch_detail(self, url: str) -> CrawlResult:
-        """抓取事件详情页（含降级：从列表页链接文本提取）"""
+        """抓取事件详情页；缺少官方标题时明确失败，不从 URL 猜名称。"""
         try:
             resp = await self._safe_get(url)
-            # 如果详情页返回错误（如 500），尝试从 URL slug 提取基本信息
             raw_data = self._parse_detail_html(resp.text, url)
             if not raw_data.get("title"):
-                # 降级：从 URL slug 推断名称
-                slug = url.rstrip("/").split("/")[-1]
-                raw_data["title"] = slug.replace("-", " ").replace("_", " ").title()
-                raw_data["_fallback"] = "url_slug"
+                return CrawlResult(
+                    source_platform=self.platform_name,
+                    source_url=url,
+                    raw_title="",
+                    raw_data=raw_data,
+                    success=False,
+                    error_message="missing_required_title",
+                )
             return CrawlResult(
                 source_platform=self.platform_name,
                 source_url=url,
@@ -80,15 +88,13 @@ class ETHGlobalCrawler(BaseCrawler):
                 raw_data=raw_data,
             )
         except CrawlerError as e:
-            logger.warning(f"[{self.platform_name}] 详情爬取失败 {url}: {e}")
-            # 降级：返回带 URL 的最小结果
-            slug = url.rstrip("/").split("/")[-1]
+            logger.error(f"[{self.platform_name}] 详情爬取失败 {url}: {e}")
             return CrawlResult(
                 source_platform=self.platform_name,
                 source_url=url,
-                raw_title=slug.replace("-", " ").title(),
-                raw_description="",
-                raw_data={"title": slug.replace("-", " ").title(), "url": url, "_fallback": "error"},
+                raw_title="",
+                success=False,
+                error_message=str(e),
             )
 
     def _parse_detail_html(self, html: str, url: str) -> dict:
@@ -98,9 +104,17 @@ class ETHGlobalCrawler(BaseCrawler):
 
         data: dict = {"url": url}
 
+        cover_image, image_urls = extract_images_from_html(soup, base_url=url)
+        if cover_image:
+            data["cover_image"] = cover_image
+        data["image_urls"] = image_urls
+        for key, value in extract_event_json_ld(soup).items():
+            if value and key not in data:
+                data[key] = value
+
         # 标题
         title_el = soup.select_one("h1") or soup.select_one("h2")
-        if title_el:
+        if title_el and not data.get("title"):
             title_text = title_el.get_text(strip=True)
             # ETHGlobal 标题通常包含 "ETHGlobal <Name> <Year>"
             if title_text:
@@ -120,35 +134,45 @@ class ETHGlobalCrawler(BaseCrawler):
             if not data.get("description"):
                 data["description"] = body_text
 
-        # 日期：查找包含月份关键词的文本
-        months = r"(January|February|March|April|May|June|July|August|September|October|November|December|Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
-        for el in soup.select("[class*='date'], [class*='time'], time, p, span, div"):
-            text = el.get_text(" ", strip=True)
-            if re.search(months, text) and re.search(r"\d{4}", text):
-                if "start" not in data:
-                    data["start_date"] = text[:100]
+        date_fragments = compact_text_fragments(
+            soup,
+            selectors=("time", "[class*='date']", "[class*='time']"),
+            max_length=180,
+        )
+        if not data.get("start_date"):
+            for text in date_fragments:
+                start, end = extract_explicit_date_range(text)
+                if start is None:
+                    continue
+                if end is None and not re.search(r"\b(date|starts?|begins?)\b", text, re.IGNORECASE):
+                    continue
+                data["start_date"] = start
+                if end:
+                    data["end_date"] = end
                 break
 
-        # 地点：查找城市/国家关键词
-        location_patterns = [
-            r"(Lisbon|Tokyo|Mumbai|San Francisco|New York|London|Berlin|Paris|Singapore|Seoul|Online|Async)",
-        ]
-        for el in soup.select("[class*='location'], [class*='venue'], p, span, div"):
-            text = el.get_text(" ", strip=True)
-            for pattern in location_patterns:
-                match = re.search(pattern, text)
-                if match and len(text) < 200:
-                    data["location"] = text[:100]
-                    break
-            if data.get("location"):
-                break
+        # 地点只接受结构化位置节点，不靠城市白名单扫描整页。
+        if not data.get("location"):
+            location_el = soup.select_one("[class*='location'], [class*='venue']")
+            if location_el:
+                location = location_el.get_text(" ", strip=True)
+                if 0 < len(location) <= 150:
+                    data["location"] = location
 
-        # 模式判断
-        body_lower = (data.get("description", "") + " " + data.get("location", "")).lower()
-        if "online" in body_lower or "async" in body_lower:
-            data["mode"] = "online"
-        elif "irl" in body_lower or "in person" in body_lower:
-            data["mode"] = "offline"
+        if not data.get("mode"):
+            mode_el = soup.select_one("[class*='format'], [class*='mode'], [class*='event-type']")
+            mode_evidence = " ".join(
+                part
+                for part in (
+                    mode_el.get_text(" ", strip=True) if mode_el else "",
+                    str(data.get("location") or ""),
+                )
+                if part
+            ).casefold()
+            if "online" in mode_evidence or "async" in mode_evidence:
+                data["mode"] = "online"
+            elif "irl" in mode_evidence or "in person" in mode_evidence or "offline" in mode_evidence:
+                data["mode"] = "offline"
 
         # 赛道标签：ETHGlobal 都是 Web3/区块链
         data["tracks"] = ["Web3", "Blockchain", "Ethereum"]

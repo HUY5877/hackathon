@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Callable
 
 from app.config import settings
-from app.crawler.base import CrawlResult
+from app.crawler.base import CrawlResult, crawl_result_validation_error
 from app.crawler.dorahacks import dorahacks_crawler
 from app.crawler.devpost import devpost_crawler
 from app.crawler.mlh import mlh_crawler
@@ -32,7 +32,7 @@ from app.crawler.ethglobal import ethglobal_crawler
 from app.crawler.hackathon_com import hackathon_com_crawler
 from app.crawler.itch_jams import itch_jams_crawler
 from app.crawler.llm_processor import StandardizedHackathon
-from app.crawler.mapper import crawl_result_to_standardized
+from app.crawler.mapper import crawl_result_to_standardized, parse_date
 from app.crawler.persistence import persist_batch, PersistenceResult
 from app.crawler.screening_worker import screening_worker
 from app.db import async_session_factory
@@ -104,8 +104,8 @@ def _normalize_name(name: str) -> str:
     if not name:
         return ""
     name = name.lower()
-    # 去除常见后缀/前缀词
-    name = re.sub(r"\b(hackathon|黑客松|黑客马拉松|2026|2025)\b", "", name, flags=re.IGNORECASE)
+    # 只移除赛事类型词，年份属于赛事身份，不能丢弃。
+    name = re.sub(r"\b(hackathon|黑客马拉松)\b|黑客松", "", name, flags=re.IGNORECASE)
     # 去除非字母数字（保留中文）
     name = re.sub(r"[^\w\u4e00-\u9fff]", "", name, flags=re.UNICODE)
     return name
@@ -133,6 +133,35 @@ def _normalize_url(url: str) -> str:
     # 去尾部斜杠
     url = url.rstrip("/")
     return url.lower()
+
+
+def _same_event_date(a: StandardizedHackathon, b: StandardizedHackathon) -> bool:
+    """Require shared schedule evidence before merging similar cross-source names."""
+    comparable = False
+    for field_name in ("event_start", "event_end"):
+        left = parse_date(getattr(a, field_name, None))
+        right = parse_date(getattr(b, field_name, None))
+        if left is None or right is None:
+            continue
+        comparable = True
+        if left.date() != right.date():
+            return False
+    return comparable
+
+
+def _partition_crawl_results(
+    results: list[CrawlResult],
+) -> tuple[list[CrawlResult], list[dict[str, str]]]:
+    """Separate persistable source records from failed or incomplete parses."""
+    usable: list[CrawlResult] = []
+    rejected: list[dict[str, str]] = []
+    for result in results:
+        reason = crawl_result_validation_error(result)
+        if reason is None:
+            usable.append(result)
+            continue
+        rejected.append({"source_url": result.source_url, "reason": reason})
+    return usable, rejected
 
 
 def deduplicate(
@@ -165,9 +194,9 @@ def deduplicate(
                 })
                 break
 
-            # 名称相似度高 → 重复
+            # 名称相似只是候选；必须有一致的赛事日期作为独立证据。
             sim = _name_similarity(item.name, existing.name)
-            if sim >= threshold:
+            if sim >= threshold and _same_event_date(item, existing):
                 is_dup = True
                 _merge_into(existing, item)
                 merged_records.append({
@@ -175,7 +204,7 @@ def deduplicate(
                     "kept_url": existing.source_url,
                     "dropped": item.source_platform,
                     "dropped_url": item.source_url,
-                    "reason": "name_similarity",
+                    "reason": "name_and_date_match",
                     "similarity": round(sim, 3),
                 })
                 break
@@ -289,11 +318,54 @@ class CrawlerScheduler:
             max_items = settings.CRAWLER_MAX_ITEMS_PER_PLATFORM or None
             raw_results: list[CrawlResult] = await crawler.run(max_items=max_items)
 
-            # 2. 仅做确定性字段映射。LLM 筛选与清洗由入库后的 worker 异步执行。
-            standardized = [crawl_result_to_standardized(item) for item in raw_results]
+            # 2. 拒绝抓取失败、缺标题或来源 URL 无效的数据，再做确定性字段映射。
+            usable_results, rejected_results = _partition_crawl_results(raw_results)
+            source_failure_count = sum(not item.success for item in raw_results)
+            invalid_count = len(rejected_results) - source_failure_count
+            for rejected in rejected_results:
+                logger.warning(
+                    "[Scheduler] %s 丢弃不可入库结果: url=%s, reason=%s",
+                    platform,
+                    rejected["source_url"],
+                    rejected["reason"],
+                )
+            standardized = [
+                crawl_result_to_standardized(item) for item in usable_results
+            ]
+
+            if not standardized:
+                elapsed = (datetime.now() - start_time).total_seconds()
+                error = "爬虫未返回任何可入库的赛事"
+                result = {
+                    "platform": platform,
+                    "status": "error",
+                    "raw_count": len(raw_results),
+                    "success_count": 0,
+                    "failed_count": source_failure_count,
+                    "invalid_count": invalid_count,
+                    "mapped_count": 0,
+                    "cleaned_count": 0,
+                    "screening_queued_count": 0,
+                    "elapsed_seconds": round(elapsed, 1),
+                    "timestamp": start_time.isoformat(),
+                    "error": error,
+                }
+                self._record_run(result)
+                await self._alert_failure(platform, error)
+                _report_progress(
+                    progress_callback,
+                    progress=100,
+                    phase="failed",
+                    message=f"{platform} 未获得有效赛事",
+                    current_platform=platform,
+                    completed_platforms=1,
+                    total_platforms=1,
+                )
+                return result
 
             # 3. 持久化到数据库（可选）
             persistence_result = None
+            screening_queued_count = 0
             if persist and standardized:
                 _report_progress(
                     progress_callback,
@@ -305,7 +377,9 @@ class CrawlerScheduler:
                 try:
                     async with async_session_factory() as session:
                         persistence_result = await persist_batch(session, standardized)
-                    screening_worker.enqueue(persistence_result.event_ids)
+                    screening_queued_count = screening_worker.enqueue(
+                        persistence_result.event_ids
+                    )
                     logger.info(f"[Scheduler] {platform} 持久化: {persistence_result}")
                 except Exception as e:
                     logger.error(f"[Scheduler] {platform} 持久化失败: {e}")
@@ -324,15 +398,17 @@ class CrawlerScheduler:
                 self._save_to_json(platform, standardized)
 
             elapsed = (datetime.now() - start_time).total_seconds()
-            success_count = sum(1 for r in raw_results if r.success)
             result = {
                 "platform": platform,
                 "status": "success",
                 "raw_count": len(raw_results),
-                "success_count": success_count,
-                "failed_count": len(raw_results) - success_count,
+                "success_count": len(usable_results),
+                "failed_count": source_failure_count,
+                "invalid_count": invalid_count,
                 "mapped_count": len(standardized),
-                "cleaned_count": len(standardized),
+                # 筛选/清洗在异步 worker 中完成，爬虫结束时不能宣称已清洗。
+                "cleaned_count": 0,
+                "screening_queued_count": screening_queued_count,
                 "elapsed_seconds": round(elapsed, 1),
                 "schedule": CRAWL_SCHEDULE.get(platform, "按需"),
                 "timestamp": start_time.isoformat(),
@@ -437,18 +513,48 @@ class CrawlerScheduler:
                 raw_results = await crawler.run(max_items=max_items)
                 # Crawler tasks must not wait for LLM calls. Persist source data
                 # first, then enqueue the stored rows for asynchronous screening.
-                standardized = [crawl_result_to_standardized(item) for item in raw_results]
-                all_standardized.extend(standardized)
-
-                elapsed = (datetime.now() - platform_start).total_seconds()
-                result = {
-                    "platform": platform,
-                    "status": "success",
-                    "raw_count": len(raw_results),
-                    "mapped_count": len(standardized),
-                    "cleaned_count": len(standardized),
-                    "elapsed_seconds": round(elapsed, 1),
-                }
+                usable_results, rejected_results = _partition_crawl_results(raw_results)
+                source_failure_count = sum(not item.success for item in raw_results)
+                invalid_count = len(rejected_results) - source_failure_count
+                for rejected in rejected_results:
+                    logger.warning(
+                        "[Scheduler] %s 丢弃不可入库结果: url=%s, reason=%s",
+                        platform,
+                        rejected["source_url"],
+                        rejected["reason"],
+                    )
+                standardized = [
+                    crawl_result_to_standardized(item) for item in usable_results
+                ]
+                if not standardized:
+                    error = "爬虫未返回任何可入库的赛事"
+                    result = {
+                        "platform": platform,
+                        "status": "error",
+                        "raw_count": len(raw_results),
+                        "success_count": 0,
+                        "failed_count": source_failure_count,
+                        "invalid_count": invalid_count,
+                        "mapped_count": 0,
+                        "cleaned_count": 0,
+                        "error": error,
+                        "elapsed_seconds": round((datetime.now() - platform_start).total_seconds(), 1),
+                    }
+                    await self._alert_failure(platform, error)
+                else:
+                    all_standardized.extend(standardized)
+                    elapsed = (datetime.now() - platform_start).total_seconds()
+                    result = {
+                        "platform": platform,
+                        "status": "success",
+                        "raw_count": len(raw_results),
+                        "success_count": len(usable_results),
+                        "failed_count": source_failure_count,
+                        "invalid_count": invalid_count,
+                        "mapped_count": len(standardized),
+                        "cleaned_count": 0,
+                        "elapsed_seconds": round(elapsed, 1),
+                    }
             except Exception as e:
                 logger.error(f"[Scheduler] 平台 {platform} 失败: {e}")
                 result = {
@@ -500,10 +606,13 @@ class CrawlerScheduler:
             total_platforms=total_platforms,
         )
         persistence_result: PersistenceResult | None = None
+        screening_queued_count = 0
         try:
             async with async_session_factory() as session:
                 persistence_result = await persist_batch(session, deduped)
-            screening_worker.enqueue(persistence_result.event_ids)
+            screening_queued_count = screening_worker.enqueue(
+                persistence_result.event_ids
+            )
             logger.info(f"[Scheduler] 持久化完成: {persistence_result}")
         except Exception as e:
             logger.error(f"[Scheduler] 持久化失败（不影响 JSON 保存）: {e}")
@@ -532,6 +641,7 @@ class CrawlerScheduler:
                 "merged": len(merged_records),
             },
             "persistence": persistence_result.to_dict() if persistence_result else None,
+            "screening_queued_count": screening_queued_count,
             "total_elapsed_seconds": round(total_elapsed, 1),
             "summary": self._build_summary(platform_results),
         }

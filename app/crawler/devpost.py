@@ -14,6 +14,11 @@ import logging
 import re
 
 from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError, extract_images_from_html
+from app.crawler.extraction import (
+    compact_text_fragments,
+    extract_event_json_ld,
+    extract_explicit_date_range,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -101,10 +106,13 @@ class DevpostCrawler(BaseCrawler):
         if cover_image:
             data["cover_image"] = cover_image
         data["image_urls"] = image_urls
+        for key, value in extract_event_json_ld(soup).items():
+            if value and key not in data:
+                data[key] = value
 
         # 标题
         title_el = soup.select_one("h1") or soup.select_one("#challenge-title")
-        if title_el:
+        if title_el and not data.get("title"):
             data["title"] = title_el.get_text(strip=True)
         if not data.get("title"):
             # 从 title 标签提取
@@ -136,31 +144,47 @@ class DevpostCrawler(BaseCrawler):
         if prize_el:
             data["prize"] = prize_el.get_text(strip=True)
 
-        # 时间信息
-        for el in soup.select("[class*='date'], [class*='time'], time"):
-            text = el.get_text(strip=True)
-            if not text:
+        # 时间信息必须来自 JSON-LD 或带语义的局部节点。
+        for el in soup.select("[itemprop='startDate'], [itemprop='endDate'], [class*='date'], [class*='time'], time"):
+            text = el.get("datetime") or el.get("content") or el.get_text(" ", strip=True)
+            start, end = extract_explicit_date_range(text)
+            if start is None:
                 continue
-            if "start" in (el.get("class") or []) or "begins" in text.lower():
-                data["start_date"] = text
-            elif "end" in (el.get("class") or []) or "ends" in text.lower():
-                data["end_date"] = text
-            elif "registration" in text.lower() or "deadline" in text.lower():
-                data["signup_end"] = text
+            semantic = " ".join(el.get("class") or []).casefold()
+            semantic += " " + str(el.get("itemprop") or "").casefold()
+            lower = str(text).casefold()
+            if "registration" in semantic or "deadline" in semantic or "registration" in lower or "deadline" in lower:
+                data.setdefault("signup_end", end or start)
+            elif "end" in semantic or "ends" in lower:
+                data.setdefault("end_date", end or start)
+            elif "start" in semantic or "begins" in lower or end is not None:
+                data.setdefault("start_date", start)
+                if end:
+                    data.setdefault("end_date", end)
 
         # 地点
         location_el = soup.select_one("[class*='location']") or soup.select_one("[class*='venue']")
         if location_el:
             data["location"] = location_el.get_text(strip=True)
 
-        # 模式（online/offline/in-person）
-        body_text = soup.get_text(" ", strip=True).lower()
-        if "online" in body_text and "in-person" in body_text:
-            data["mode"] = "hybrid"
-        elif "online" in body_text:
-            data["mode"] = "online"
-        elif "in-person" in body_text:
-            data["mode"] = "offline"
+        # 模式只接受明确的形式标签/短语，不扫描导航和页脚。
+        if not data.get("mode"):
+            mode_fragments = compact_text_fragments(
+                soup,
+                selectors=("[class*='mode']", "[class*='format']", "[class*='location']"),
+                max_length=120,
+            )
+            mode_text = " ".join(
+                text
+                for text in mode_fragments
+                if re.search(r"online event|in[- ]person|hybrid|event format|location", text, re.IGNORECASE)
+            ).casefold()
+            if "hybrid" in mode_text or ("online event" in mode_text and "in-person" in mode_text):
+                data["mode"] = "hybrid"
+            elif "online event" in mode_text or "virtual event" in mode_text:
+                data["mode"] = "online"
+            elif "in-person" in mode_text or "in person" in mode_text:
+                data["mode"] = "offline"
 
         # 标签/赛道
         tags: list[str] = []

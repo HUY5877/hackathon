@@ -15,6 +15,7 @@ import re
 from datetime import datetime
 
 from app.crawler.base import BaseCrawler, CrawlResult, CrawlerError
+from app.crawler.extraction import compact_text_fragments, extract_event_json_ld
 
 logger = logging.getLogger(__name__)
 
@@ -166,14 +167,24 @@ class EventbriteCrawler(BaseCrawler):
         if price_el:
             data["price"] = price_el.get_text(strip=True)
 
-        # 7. 模式判断
-        body_text = soup.get_text(" ", strip=True).lower()
-        if "online" in body_text and "in-person" in body_text:
-            data["mode"] = "hybrid"
-        elif "online event" in body_text or "virtual" in body_text:
-            data["mode"] = "online"
-        elif "in-person" in body_text:
-            data["mode"] = "offline"
+        # 7. 模式判断：优先 JSON-LD，回退时只读取局部形式/地点节点。
+        if not data.get("mode"):
+            fragments = compact_text_fragments(
+                soup,
+                selectors=("[class*='mode']", "[class*='format']", "[class*='location']", "[class*='venue']"),
+                max_length=140,
+            )
+            evidence = " ".join(
+                text
+                for text in fragments
+                if re.search(r"online event|virtual event|in[- ]person|hybrid", text, re.IGNORECASE)
+            ).casefold()
+            if "hybrid" in evidence or ("online event" in evidence and "in-person" in evidence):
+                data["mode"] = "hybrid"
+            elif "online event" in evidence or "virtual event" in evidence:
+                data["mode"] = "online"
+            elif "in-person" in evidence or "in person" in evidence:
+                data["mode"] = "offline"
 
         # 8. 标签
         tags: list[str] = []
@@ -185,7 +196,7 @@ class EventbriteCrawler(BaseCrawler):
             data["tracks"] = tags
 
         # 9. 提取图片 ──────────────────────────────
-        image_urls: list[str] = []
+        image_urls: list[str] = list(data.get("image_urls") or [])
         base_url = self.base_url
 
         # 9.1 JSON-LD 中可能包含图片
@@ -203,7 +214,7 @@ class EventbriteCrawler(BaseCrawler):
             if img_url:
                 from urllib.parse import urljoin
                 full_img_url = urljoin(base_url, img_url)
-                data["cover_image"] = full_img_url
+                data.setdefault("cover_image", full_img_url)
                 if full_img_url not in image_urls:
                     image_urls.append(full_img_url)
 
@@ -233,76 +244,8 @@ class EventbriteCrawler(BaseCrawler):
         return data
 
     def _extract_json_ld(self, soup) -> dict:
-        """从 <script type="application/ld+json"> 提取结构化数据
-
-        Eventbrite 通常包含 Event 类型的 JSON-LD：
-        {
-            "@type": "Event",
-            "name": "...",
-            "description": "...",
-            "startDate": "2026-07-15T09:00:00",
-            "endDate": "2026-07-17T18:00:00",
-            "location": {...},
-            "organizer": {...},
-            "offers": {...}
-        }
-        """
-        import json
-        data: dict = {}
-        for script in soup.select('script[type="application/ld+json"]'):
-            try:
-                content = script.string or script.get_text()
-                if not content:
-                    continue
-                parsed = json.loads(content)
-                # 可能是单个对象或列表
-                items = parsed if isinstance(parsed, list) else [parsed]
-                for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    # 找 Event 类型
-                    item_type = item.get("@type", "")
-                    if item_type == "Event" or "Event" in (item_type if isinstance(item_type, list) else [item_type]):
-                        if item.get("name"):
-                            data["title"] = item["name"]
-                        if item.get("description"):
-                            data["description"] = item["description"][:2000]
-                        if item.get("startDate"):
-                            data["start_date"] = item["startDate"]
-                        if item.get("endDate"):
-                            data["end_date"] = item["endDate"]
-                        # image 可能包含在 JSON-LD 中
-                        if item.get("image"):
-                            data["image"] = item["image"]
-                        # location 可能是 Place 对象或字符串
-                        loc = item.get("location")
-                        if isinstance(loc, dict):
-                            data["location"] = loc.get("name") or loc.get("address", "")
-                            if isinstance(loc.get("address"), dict):
-                                addr = loc["address"]
-                                data["city"] = addr.get("addressLocality", "")
-                                data["country"] = addr.get("addressCountry", "")
-                        elif isinstance(loc, str):
-                            data["location"] = loc
-                        # organizer
-                        org = item.get("organizer")
-                        if isinstance(org, dict):
-                            data["organizer"] = org.get("name", "")
-                        elif isinstance(org, str):
-                            data["organizer"] = org
-                        # offers（价格）
-                        offers = item.get("offers")
-                        if isinstance(offers, dict):
-                            data["price"] = offers.get("price", "")
-                            if offers.get("url"):
-                                data["signup_url"] = offers["url"]
-                        elif isinstance(offers, list) and offers:
-                            data["price"] = offers[0].get("price", "")
-                        break
-            except (json.JSONDecodeError, ValueError) as e:
-                logger.debug(f"[{self.platform_name}] JSON-LD 解析失败: {e}")
-                continue
-        return data
+        """提取 schema.org Event，支持列表与 ``@graph`` 嵌套。"""
+        return extract_event_json_ld(soup)
 
 
 eventbrite_crawler = EventbriteCrawler()

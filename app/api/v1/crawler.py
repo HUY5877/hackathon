@@ -45,7 +45,12 @@ class RunResultResponse(BaseModel):
     platform: str
     status: str
     raw_count: int = 0
+    success_count: int = 0
+    failed_count: int = 0
+    invalid_count: int = 0
+    mapped_count: int = 0
     cleaned_count: int = 0
+    screening_queued_count: int = 0
     elapsed_seconds: float = 0.0
     error: str | None = None
 

@@ -10,6 +10,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -62,6 +63,24 @@ class CrawlResult:
     # 标记本次抓取是否成功，便于调度器统计
     success: bool = True
     error_message: str | None = None
+
+
+def crawl_result_validation_error(result: CrawlResult) -> str | None:
+    """Return why a crawl result must not enter mapping/persistence.
+
+    Individual crawlers may fail open or return an empty parse after a source
+    page changes.  The scheduler uses this as a final data-integrity barrier.
+    """
+    if not result.success:
+        return result.error_message or "detail_fetch_failed"
+    if not isinstance(result.raw_title, str) or not result.raw_title.strip():
+        return "missing_required_title"
+    if not isinstance(result.source_platform, str) or not result.source_platform.strip():
+        return "missing_source_platform"
+    parsed_url = urlparse(result.source_url or "")
+    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+        return "invalid_source_url"
+    return None
 
 
 # ── 重试装饰器 ────────────────────────────────────────

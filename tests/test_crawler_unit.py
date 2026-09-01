@@ -22,6 +22,12 @@ from app.crawler.base import (
     retry_async,
     _pick_user_agent,
     _USER_AGENTS,
+    crawl_result_validation_error,
+)
+from app.crawler.extraction import (
+    compact_text_fragments,
+    extract_event_json_ld,
+    extract_explicit_date_range,
 )
 from app.crawler.llm_processor import (
     LLMProcessor,
@@ -34,6 +40,7 @@ from app.crawler.scheduler import (
     _normalize_name,
     _normalize_url,
     _name_similarity,
+    _partition_crawl_results,
     DEDUP_SIMILARITY_THRESHOLD,
 )
 
@@ -58,6 +65,68 @@ class TestExceptions:
         assert issubclass(HTTPStatusError, CrawlerError)
         assert issubclass(ParseError, CrawlerError)
         assert issubclass(BlockedError, CrawlerError)
+
+
+class TestEvidenceBasedExtraction:
+    def test_explicit_date_range_requires_connector(self):
+        assert extract_explicit_date_range(
+            "Event dates: 2026-07-15 to 2026-07-17"
+        ) == ("2026-07-15", "2026-07-17")
+        assert extract_explicit_date_range(
+            "Published 2026-01-01; registration 2026-02-01"
+        ) == (None, None)
+
+    def test_explicit_date_range_rejects_three_dates(self):
+        assert extract_explicit_date_range(
+            "2026-01-01 to 2026-01-02, updated 2026-01-03"
+        ) == (None, None)
+        assert extract_explicit_date_range(
+            "Jan 1-2, 2026, updated Jan 3, 2026"
+        ) == (None, None)
+
+    def test_json_ld_event_supports_graph_nesting(self):
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(
+            """
+            <script type="application/ld+json">
+            {"@graph":[{"@type":"WebPage"},{"@type":"Event","name":"Official Event",
+            "startDate":"2026-09-01","endDate":"2026-09-02",
+            "eventAttendanceMode":"https://schema.org/OnlineEventAttendanceMode"}]}
+            </script>
+            """,
+            "lxml",
+        )
+
+        data = extract_event_json_ld(soup)
+
+        assert data["title"] == "Official Event"
+        assert data["start_date"] == "2026-09-01"
+        assert data["end_date"] == "2026-09-02"
+        assert data["mode"] == "online"
+
+    def test_selected_fragments_do_not_fall_back_to_navigation_text(self):
+        from bs4 import BeautifulSoup
+
+        soup = BeautifulSoup(
+            '<nav>Online events</nav><div class="event-mode">In-person only</div>',
+            "lxml",
+        )
+
+        assert compact_text_fragments(
+            soup, selectors=(".event-mode",), max_length=100
+        ) == ["In-person only"]
+
+    def test_crawl_result_validation_rejects_failed_and_incomplete_rows(self):
+        failed = CrawlResult("p", "https://example.com/1", "Event", success=False)
+        missing_title = CrawlResult("p", "https://example.com/2", "")
+        invalid_url = CrawlResult("p", "not-a-url", "Event")
+        valid = CrawlResult("p", "https://example.com/3", "Event")
+
+        assert crawl_result_validation_error(failed) is not None
+        assert crawl_result_validation_error(missing_title) == "missing_required_title"
+        assert crawl_result_validation_error(invalid_url) == "invalid_source_url"
+        assert crawl_result_validation_error(valid) is None
 
 
 # ── 重试机制测试 ──────────────────────────────────────
@@ -410,7 +479,7 @@ class TestLLMProcessorFallback:
 
 class TestDeduplication:
     def test_normalize_name(self):
-        assert _normalize_name("AI Hackathon 2026") == "ai"
+        assert _normalize_name("AI Hackathon 2026") == "ai2026"
         assert _normalize_name("Hello World!") == "helloworld"
         assert _normalize_name("黑客松") == ""
         assert _normalize_name("") == ""
@@ -427,10 +496,10 @@ class TestDeduplication:
     def test_name_similarity_different(self):
         assert _name_similarity("AI Hackathon", "Web Conference") < 0.5
 
-    def test_name_similarity_normalized(self):
-        """规范化后相似度高"""
+    def test_name_similarity_keeps_edition_year(self):
+        """不同届赛事不能因为移除年份而变成同一名称。"""
         sim = _name_similarity("AI Hackathon 2026", "AI Hackathon 2025")
-        assert sim >= 0.85
+        assert sim < DEDUP_SIMILARITY_THRESHOLD
 
     def test_dedup_url_match(self):
         """URL 相同去重"""
@@ -444,14 +513,54 @@ class TestDeduplication:
         assert merged[0]["reason"] == "url_match"
 
     def test_dedup_name_similarity(self):
-        """名称相似去重"""
+        """名称与赛事日期同时一致才允许跨来源去重。"""
         items = [
-            StandardizedHackathon(name="AI Hackathon 2026", slug="ai", source_url="https://p1.com/1", source_platform="p1"),
-            StandardizedHackathon(name="AI Hackathon 2025", slug="ai2", source_url="https://p2.com/2", source_platform="p2"),
+            StandardizedHackathon(
+                name="AI Hackathon 2026",
+                slug="ai",
+                source_url="https://p1.com/1",
+                source_platform="p1",
+                event_start="2026-08-01",
+            ),
+            StandardizedHackathon(
+                name="AI Hackathon 2026!",
+                slug="ai2",
+                source_url="https://p2.com/2",
+                source_platform="p2",
+                event_start="2026-08-01",
+            ),
         ]
         deduped, merged = deduplicate(items)
         assert len(deduped) == 1
-        assert merged[0]["reason"] == "name_similarity"
+        assert merged[0]["reason"] == "name_and_date_match"
+
+    def test_dedup_does_not_merge_different_editions(self):
+        items = [
+            StandardizedHackathon(
+                name="AI Hackathon 2025", slug="a", source_url="https://p1.com/1",
+                source_platform="p1", event_start="2025-08-01",
+            ),
+            StandardizedHackathon(
+                name="AI Hackathon 2026", slug="b", source_url="https://p2.com/2",
+                source_platform="p2", event_start="2026-08-01",
+            ),
+        ]
+
+        deduped, merged = deduplicate(items)
+
+        assert len(deduped) == 2
+        assert merged == []
+
+    def test_dedup_does_not_merge_names_without_date_evidence(self):
+        items = [
+            StandardizedHackathon(name="AI Hackathon", slug="a", source_url="https://p1.com/1", source_platform="p1"),
+            StandardizedHackathon(name="AI Hackathon", slug="b", source_url="https://p2.com/2", source_platform="p2"),
+        ]
+
+        deduped, merged = deduplicate(items)
+
+        assert len(deduped) == 2
+        assert merged == []
 
     def test_dedup_no_false_positive(self):
         """不同活动不去重"""
@@ -518,6 +627,42 @@ class TestDevpostParsing:
         assert "ML" in data["tracks"]
 
 
+class TestSaikrParsing:
+    def test_dates_are_assigned_by_business_label(self):
+        from app.crawler.saikr import SaikrCrawler
+
+        html = """
+        <html><body>
+            <h1>全国 AI 挑战赛</h1>
+            <div class="info-item">发布日期：2025-12-20</div>
+            <div class="info-item">报名时间：2026-01-01 至 2026-02-01</div>
+            <div class="info-item">比赛时间：2026-03-10 至 2026-03-12</div>
+        </body></html>
+        """
+
+        data = SaikrCrawler()._parse_detail_html(html, "https://www.saikr.com/vse/test")
+
+        assert data["signup_start"] == "2026-01-01"
+        assert data["signup_end"] == "2026-02-01"
+        assert data["start_date"] == "2026-03-10"
+        assert data["end_date"] == "2026-03-12"
+
+    def test_unlabeled_page_dates_are_not_treated_as_event_schedule(self):
+        from app.crawler.saikr import SaikrCrawler
+
+        html = """
+        <html><body>
+            <h1>全国 AI 挑战赛</h1>
+            <p>文章发布于 2025-12-20，更新于 2025-12-21。</p>
+        </body></html>
+        """
+
+        data = SaikrCrawler()._parse_detail_html(html, "https://www.saikr.com/vse/test")
+
+        assert "start_date" not in data
+        assert "end_date" not in data
+
+
 class TestMLHParsing:
     def test_parse_list_html(self):
         from app.crawler.mlh import MLHCrawler
@@ -533,6 +678,20 @@ class TestMLHParsing:
         assert len(urls) == 2
         assert "https://mlh.io/events/spring-hack-2026" in urls
         assert "https://mlh.io/events/summer-hack" in urls
+
+    def test_embedded_auxiliary_urls_are_canonicalized(self):
+        from app.crawler.mlh import MLHCrawler
+
+        html = """
+        <script type="application/json">
+        {"events":[{"slug":"spring-hack","url":"/events/spring-hack/prizes"},
+        {"slug":"spring-hack","url":"/events/spring-hack/schedule"}]}
+        </script>
+        """
+
+        assert MLHCrawler()._parse_list_html(html) == [
+            "https://mlh.io/events/spring-hack"
+        ]
 
     def test_parse_date_range_iso(self):
         from app.crawler.mlh import MLHCrawler
@@ -593,6 +752,24 @@ class TestHuodongxingParsing:
         assert data["mode"] == "online"
         assert "AI" in data.get("tracks", [])
 
+    def test_labeled_time_range_sets_both_event_dates(self):
+        from app.crawler.huodongxing import HuodongxingCrawler
+
+        html = """
+        <html><body>
+            <h1>AI 黑客松</h1>
+            <div class="info-item">时间：2026-07-15 09:00 至 2026-07-17 18:00</div>
+            <time datetime="2025-12-01">发布时间</time>
+        </body></html>
+        """
+
+        data = HuodongxingCrawler()._parse_detail_html(
+            html, "https://www.huodongxing.com/event/12345"
+        )
+
+        assert data["start_date"].startswith("2026-07-15")
+        assert data["end_date"].startswith("2026-07-17")
+
 
 class TestTianchiParsing:
     def test_extract_items_data_list(self):
@@ -616,6 +793,17 @@ class TestTianchiParsing:
         assert crawler._extract_items({"data": {}}) == []
         assert crawler._extract_items("not dict") == []
 
+    def test_empty_detail_is_explicit_failure(self):
+        from app.crawler.tianchi import TianchiCrawler
+
+        result = TianchiCrawler()._build_result(
+            "https://tianchi.aliyun.com/competition/entrance/1/introduction",
+            {"title": "", "error": "detail unavailable"},
+        )
+
+        assert result.success is False
+        assert result.error_message == "detail unavailable"
+
 
 # ── Scheduler 测试 ────────────────────────────────────
 
@@ -625,6 +813,18 @@ class TestScheduler:
         s = CrawlerScheduler()
         assert s._stats["total_runs"] == 0
         assert s._max_history == 50
+
+    def test_partition_rejects_failed_and_missing_title_results(self):
+        results = [
+            CrawlResult("p", "https://example.com/ok", "Valid Event"),
+            CrawlResult("p", "https://example.com/fail", "", success=False, error_message="blocked"),
+            CrawlResult("p", "https://example.com/empty", ""),
+        ]
+
+        usable, rejected = _partition_crawl_results(results)
+
+        assert [item.raw_title for item in usable] == ["Valid Event"]
+        assert {item["reason"] for item in rejected} == {"blocked", "missing_required_title"}
 
     def test_record_run_success(self):
         from app.crawler.scheduler import CrawlerScheduler
@@ -780,6 +980,11 @@ class TestMapper:
         assert d is not None
         assert d.year == 2026
 
+    def test_parse_date_rejects_ambiguous_mixed_text(self):
+        from app.crawler.mapper import parse_date
+
+        assert parse_date("发布 2026-01-01，活动 2026-07-15") is None
+
     def test_normalize_mode(self):
         from app.crawler.mapper import normalize_mode
         from app.models.hackathon import HackathonMode
@@ -854,6 +1059,27 @@ class TestMapper:
         assert orm.prize_pool_usd == 10000.0
         assert orm.source_platform == "devpost"
         assert orm.llm_confidence == 0.9
+
+    def test_to_hackathon_orm_rejects_inverted_date_ranges(self):
+        from app.crawler.mapper import to_hackathon_orm
+
+        item = StandardizedHackathon(
+            name="Inverted Dates",
+            slug="inverted-dates",
+            registration_start="2026-07-20",
+            registration_end="2026-07-01",
+            event_start="2026-08-05",
+            event_end="2026-08-01",
+            source_url="https://example.com/inverted",
+            source_platform="test",
+        )
+
+        orm = to_hackathon_orm(item)
+
+        assert orm.registration_start is None
+        assert orm.registration_end is None
+        assert orm.event_start is None
+        assert orm.event_end is None
 
     def test_to_hackathon_orm_batch_slug_dedup(self):
         from app.crawler.mapper import to_hackathon_orm_batch
@@ -1119,6 +1345,16 @@ class TestETHGlobalCrawler:
         assert data["organizer"] == "ETHGlobal"
         assert "Web3" in data["tracks"]
 
+    def test_missing_heading_does_not_invent_title_from_url(self):
+        from app.crawler.ethglobal import ETHGlobalCrawler
+
+        data = ETHGlobalCrawler()._parse_detail_html(
+            "<html><body><main>Event details unavailable</main></body></html>",
+            "https://ethglobal.com/events/lisbon2026",
+        )
+
+        assert "title" not in data
+
     def test_platform_name(self):
         """测试平台名称"""
         from app.crawler.ethglobal import ethglobal_crawler
@@ -1172,6 +1408,41 @@ class TestHackathonComCrawler:
         data = crawler._parse_detail_html(html, "https://www.hackathon.com/event/test")
         assert "March" in data.get("start_date", "")
 
+    def test_unrelated_page_dates_are_not_used_as_event_range(self):
+        from app.crawler.hackathon_com import HackathonComCrawler
+
+        html = """
+        <html><body>
+            <h1>Test Hackathon</h1>
+            <p>Published 2026-01-01</p>
+            <p>Article updated 2026-02-02</p>
+        </body></html>
+        """
+
+        data = HackathonComCrawler()._parse_detail_html(
+            html, "https://www.hackathon.com/event/test"
+        )
+
+        assert "start_date" not in data
+        assert "end_date" not in data
+
+    def test_labeled_publication_range_is_not_used_as_event_range(self):
+        from app.crawler.hackathon_com import HackathonComCrawler
+
+        html = """
+        <html><body>
+            <h1>Test Hackathon</h1>
+            <p>Published from 2026-01-01 to 2026-01-02</p>
+        </body></html>
+        """
+
+        data = HackathonComCrawler()._parse_detail_html(
+            html, "https://www.hackathon.com/event/test"
+        )
+
+        assert "start_date" not in data
+        assert "end_date" not in data
+
     def test_platform_name(self):
         """测试平台名称"""
         from app.crawler.hackathon_com import hackathon_com_crawler
@@ -1215,14 +1486,13 @@ class TestItchJamsCrawler:
         assert data["mode"] == "online"
         assert "Game Development" in data["tracks"]
 
-    def test_parse_detail_html_title_from_url(self):
-        """测试标题从 URL slug 推断"""
+    def test_parse_detail_html_does_not_invent_title_from_url(self):
+        """缺少官方标题时不用 URL slug 伪造标题。"""
         from app.crawler.itch_jams import ItchJamsCrawler
         html = "<html><body><h1>itch.io</h1></body></html>"
         crawler = ItchJamsCrawler()
         data = crawler._parse_detail_html(html, "https://itch.io/jam/gmtk-jam-2026")
-        # h1 是 "itch.io" 应被忽略，从 URL slug 推断
-        assert data["title"] == "Gmtk Jam 2026"
+        assert "title" not in data
 
     def test_parse_detail_html_participants(self):
         """测试提取参与人数"""
