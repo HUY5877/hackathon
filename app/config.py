@@ -60,6 +60,7 @@ class Settings(BaseSettings):
     CRAWLER_MAX_RETRIES: int = 3  # 最大重试次数
     CRAWLER_MAX_ITEMS_PER_PLATFORM: int = 0  # 每平台抓取上限（0=不限）
     CRAWLER_UA_ROTATION: bool = False  # 是否启用 UA 轮换
+    CRAWLER_MAX_CONCURRENCY: int = 5  # 单平台详情抓取并发上限
     CRAWLER_LLM_CACHE_TTL: int = 86400  # LLM 清洗结果缓存秒数
     CRAWLER_OUTPUT_DIR: str = "crawl_output"  # 爬取结果输出目录
 

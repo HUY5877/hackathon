@@ -1553,3 +1553,240 @@ class TestNewCrawlersRegistration:
             "hackathon_com",
             "itch_jams",
         }
+
+
+# ── HTTP 客户端复用测试 ────────────────────────────────
+
+class TestHttpClientReuse:
+    def _make_crawler(self, **kwargs):
+        class DummyCrawler(BaseCrawler):
+            platform_name = "dummy"
+            base_url = "https://example.com"
+
+            async def fetch_list(self):
+                return []
+
+            async def fetch_detail(self, url):
+                return CrawlResult(source_platform="dummy", source_url=url, raw_title="t")
+
+        return DummyCrawler(**kwargs)
+
+    def _mock_client_factory(self, created):
+        import httpx
+
+        def fake_build(proxy=None):
+            client = httpx.AsyncClient(
+                transport=httpx.MockTransport(lambda request: httpx.Response(200, text="ok"))
+            )
+            created.append(client)
+            return client
+
+        return fake_build
+
+    @pytest.mark.asyncio
+    async def test_safe_get_reuses_client_without_proxy_pool(self):
+        crawler = self._make_crawler(max_retries=0)
+        created = []
+        crawler._build_client = self._mock_client_factory(created)
+        try:
+            resp1 = await crawler._safe_get("https://example.com/1")
+            resp2 = await crawler._safe_get("https://example.com/2")
+            assert resp1.status_code == 200
+            assert resp2.status_code == 200
+            assert len(created) == 1  # 无代理池时复用同一 client（连接池生效）
+        finally:
+            await crawler.close()
+        assert crawler._client is None
+
+    @pytest.mark.asyncio
+    async def test_proxy_pool_still_builds_client_per_request(self):
+        crawler = self._make_crawler(max_retries=0, proxy="http://p1:8080,http://p2:8080")
+        created = []
+        crawler._build_client = self._mock_client_factory(created)
+        await crawler._safe_get("https://example.com/1")
+        await crawler._safe_get("https://example.com/2")
+        assert len(created) == 2  # 代理池是客户端级配置，逐请求新建以轮换代理
+
+    def test_client_survives_event_loop_switch(self):
+        import asyncio
+
+        crawler = self._make_crawler(max_retries=0)
+        created = []
+        crawler._build_client = self._mock_client_factory(created)
+
+        async def once():
+            resp = await crawler._safe_get("https://example.com/1")
+            assert resp.status_code == 200
+
+        asyncio.run(once())
+        asyncio.run(once())  # 第二个事件循环不应报 "attached to a different loop"
+        assert len(created) == 2
+
+
+# ── run() 限并发测试 ─────────────────────────────────
+
+class TestBaseCrawlerConcurrency:
+    @pytest.mark.asyncio
+    async def test_run_fetches_details_concurrently(self):
+        import asyncio
+        import time
+
+        class DummyCrawler(BaseCrawler):
+            platform_name = "dummy"
+            base_url = ""
+
+            async def fetch_list(self):
+                return [f"https://example.com/{i}" for i in range(6)]
+
+            async def fetch_detail(self, url):
+                await asyncio.sleep(0.1)
+                return CrawlResult(source_platform="dummy", source_url=url, raw_title="t")
+
+        crawler = DummyCrawler(request_delay=0, max_concurrency=3)
+        start = time.monotonic()
+        results = await crawler.run()
+        elapsed = time.monotonic() - start
+        assert len(results) == 6
+        assert elapsed < 0.5  # 串行需 ~0.6s，3 路并发应 ~0.2s
+
+    @pytest.mark.asyncio
+    async def test_run_preserves_url_order(self):
+        import asyncio
+
+        class DummyCrawler(BaseCrawler):
+            platform_name = "dummy"
+            base_url = ""
+
+            async def fetch_list(self):
+                return [f"https://example.com/{i}" for i in range(6)]
+
+            async def fetch_detail(self, url):
+                index = int(url.rsplit("/", 1)[1])
+                await asyncio.sleep((5 - index) * 0.01)  # 完成顺序与 URL 顺序相反
+                return CrawlResult(
+                    source_platform="dummy", source_url=url, raw_title=f"t{index}"
+                )
+
+        crawler = DummyCrawler(request_delay=0, max_concurrency=6)
+        results = await crawler.run()
+        assert [r.raw_title for r in results] == [f"t{i}" for i in range(6)]
+
+    @pytest.mark.asyncio
+    async def test_run_blocked_error_stops_dispatching(self):
+        class DummyCrawler(BaseCrawler):
+            platform_name = "dummy"
+            base_url = ""
+
+            async def fetch_list(self):
+                return [f"https://example.com/{i}" for i in range(5)]
+
+            async def fetch_detail(self, url):
+                if url.endswith("/0"):
+                    raise BlockedError("blocked")
+                return CrawlResult(source_platform="dummy", source_url=url, raw_title="t")
+
+        crawler = DummyCrawler(request_delay=0, max_concurrency=1)
+        results = await crawler.run()
+        assert results == []  # 第一个被拦截后不再派发后续 URL
+
+
+# ── CloakBrowser 锁测试 ──────────────────────────────
+
+class TestCloakBrowserLock:
+    def test_browser_lock_is_asyncio_lock(self):
+        import asyncio
+        from app.crawler.cloak_base import CloakBrowserBaseCrawler
+
+        crawler = CloakBrowserBaseCrawler()
+        assert isinstance(crawler._get_lock(), asyncio.Lock)
+
+    def test_cloak_crawlers_default_to_bounded_concurrency(self):
+        from app.crawler.cloak_base import CloakBrowserBaseCrawler
+
+        assert CloakBrowserBaseCrawler().max_concurrency == 3
+
+
+# ── 列表分页抓取测试 ──────────────────────────────────
+
+class TestPagination:
+    @pytest.mark.asyncio
+    async def test_eventbrite_paginates_until_no_new_links(self):
+        from app.crawler.eventbrite import EventbriteCrawler
+
+        crawler = EventbriteCrawler()
+        pages = {
+            1: '<a href="/e/alpha-111">a</a><a href="/e/beta-222">b</a>',
+            2: '<a href="/e/gamma-333">c</a>',
+            3: '<a href="/e/alpha-111">a</a>',  # 全部为旧链接 → 停止
+        }
+        requested = []
+
+        async def fake_get(url, **kwargs):
+            page = kwargs["params"]["page"]
+            requested.append(page)
+            return MagicMock(text=pages.get(page, ""))
+
+        crawler._safe_get = fake_get
+        urls = await crawler.fetch_list()
+
+        assert "https://www.eventbrite.com/e/alpha-111" in urls
+        assert "https://www.eventbrite.com/e/gamma-333" in urls
+        # 每个搜索路径在第 3 页（无新链接）停止，不会请求第 4 页
+        assert max(requested) == 3
+
+    @pytest.mark.asyncio
+    async def test_tianchi_paginates_until_short_page(self):
+        from app.crawler.tianchi import TianchiCrawler
+
+        crawler = TianchiCrawler()
+        requested = []
+
+        async def fake_get(url, **kwargs):
+            page = kwargs["params"]["page"]
+            requested.append(page)
+            count = 20 if page == 1 else 5  # 第 2 页为短页 → 停止
+            items = [{"id": page * 100 + i} for i in range(count)]
+            return MagicMock(text=json.dumps({"data": {"list": items}}))
+
+        crawler._safe_get = fake_get
+        urls = await crawler.fetch_list()
+
+        assert requested == [1, 2]
+        assert len(urls) == 25
+
+    @pytest.mark.asyncio
+    async def test_itch_paginates_to_cap_when_pages_always_have_new_links(self):
+        from app.crawler.itch_jams import ItchJamsCrawler
+
+        crawler = ItchJamsCrawler()
+
+        async def always_new(url, **kwargs):
+            page = (kwargs.get("params") or {}).get("page", 1)
+            return MagicMock(text=f'<a href="/jam/jam-{page}">j</a>')
+
+        crawler._safe_get = always_new
+        urls = await crawler.fetch_list()
+        assert len(urls) == crawler.MAX_PAGES
+
+    @pytest.mark.asyncio
+    async def test_itch_stops_when_page_has_no_new_links(self):
+        from app.crawler.itch_jams import ItchJamsCrawler
+
+        crawler = ItchJamsCrawler()
+        pages = {
+            1: '<a href="/jam/a">a</a>',
+            2: '<a href="/jam/b">b</a>',
+            3: '<a href="/jam/a">a</a>',  # 旧链接 → 停止
+        }
+        requested = []
+
+        async def dup_get(url, **kwargs):
+            page = (kwargs.get("params") or {}).get("page", 1)
+            requested.append(page)
+            return MagicMock(text=pages.get(page, ""))
+
+        crawler._safe_get = dup_get
+        urls = await crawler.fetch_list()
+
+        assert urls == ["https://itch.io/jam/a", "https://itch.io/jam/b"]
+        assert requested == [1, 2, 3]

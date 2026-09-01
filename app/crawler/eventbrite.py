@@ -36,26 +36,34 @@ SEARCH_PATHS = _build_search_paths()
 class EventbriteCrawler(BaseCrawler):
     platform_name = "eventbrite"
     base_url = "https://www.eventbrite.com"
+    # 每个搜索路径最多翻页数（页面无新链接时提前停止）
+    MAX_PAGES_PER_PATH = 5
 
     async def fetch_list(self) -> list[str]:
-        """抓取 Eventbrite 搜索页，提取活动链接"""
+        """抓取 Eventbrite 搜索页，分页直到无新链接（每路径最多 MAX_PAGES_PER_PATH 页）"""
         urls: list[str] = []
         for path in SEARCH_PATHS:
-            try:
-                resp = await self._safe_get(
-                    f"{self.base_url}{path}",
-                    params={"page": 1},
-                )
-                page_urls = self._parse_search_html(resp.text)
-                new_count = 0
-                for u in page_urls:
-                    if u not in urls:
-                        urls.append(u)
-                        new_count += 1
-                logger.info(f"[{self.platform_name}] {path} 获取 {len(page_urls)} 条 (新增 {new_count})")
-            except CrawlerError as e:
-                logger.warning(f"[{self.platform_name}] {path} 抓取失败: {e}")
-                continue
+            for page in range(1, self.MAX_PAGES_PER_PATH + 1):
+                try:
+                    resp = await self._safe_get(
+                        f"{self.base_url}{path}",
+                        params={"page": page},
+                    )
+                    page_urls = self._parse_search_html(resp.text)
+                    new_count = 0
+                    for u in page_urls:
+                        if u not in urls:
+                            urls.append(u)
+                            new_count += 1
+                    logger.info(
+                        f"[{self.platform_name}] {path} 第 {page} 页 "
+                        f"获取 {len(page_urls)} 条 (新增 {new_count})"
+                    )
+                    if new_count == 0:
+                        break  # 无新链接，该路径已抓完
+                except CrawlerError as e:
+                    logger.warning(f"[{self.platform_name}] {path} 第 {page} 页抓取失败: {e}")
+                    break
         return urls
 
     def _parse_search_html(self, html: str) -> list[str]:

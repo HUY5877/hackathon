@@ -30,12 +30,14 @@ class ItchJamsCrawler(BaseCrawler):
     platform_name = "itch_jams"
     base_url = "https://itch.io"
     jams_url = "https://itch.io/jams"
+    # 列表分页上限（页面无新链接时提前停止）
+    MAX_PAGES = 10
 
     async def fetch_list(self) -> list[str]:
-        """抓取 itch.io Jams 列表页（支持分页）"""
+        """抓取 itch.io Jams 列表页（分页直到无新链接，最多 MAX_PAGES 页）"""
         urls: list[str] = []
         # itch.io 通过 page 参数分页
-        for page in range(1, 4):
+        for page in range(1, self.MAX_PAGES + 1):
             try:
                 params = {"page": page} if page > 1 else None
                 resp = await self._safe_get(self.jams_url, params=params)
